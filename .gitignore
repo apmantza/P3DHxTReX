@@ -1,0 +1,21 @@
+.venv/
+.chrome-cdp-skill/
+.chrome-debug-profile/
+.claude/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+NUL
+
+# Local data artifacts
+data/
+*.sqlite
+*.db
+*.csv
+*.xlsx
+*.json
+*.png
+ingest_run.log
+config/current_rates.json
+config/data_points_download_flow.json

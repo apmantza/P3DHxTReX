@@ -1,0 +1,113 @@
+# =============================================================================
+# BBIRR — EDAP Download Targets (Discovered 2026-03-19)
+# =============================================================================
+# Data from https://edap-public.eba.europa.eu/
+#
+# Portal sections:
+#   Transparency → Time series, 2025/2024/2023/2022 breakdowns
+#   Pillar 3 Data HUB → Official Data Visualisation, Data Points Report
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# Report URLs (base64-encoded IDs in the path)
+# -----------------------------------------------------------------------------
+urls:
+  # TrEx (Transparency Exercise)
+  tr_time_series: "https://edap-public.eba.europa.eu/Report/index/MjE="
+
+  # 2025 TrEx reports
+  tr_2025_capital:    "https://edap-public.eba.europa.eu/Report/index/MjI="
+  tr_2025_credit_risk: "https://edap-public.eba.europa.eu/Report/index/MjM="
+  tr_2025_npe:        "https://edap-public.eba.europa.eu/Report/index/MjQ="
+  tr_2025_nace:       "https://edap-public.eba.europa.eu/Report/index/MjU="
+  tr_2025_sovereign:  "https://edap-public.eba.europa.eu/Report/index/MjY="
+  tr_2025_data_annex: "https://edap-public.eba.europa.eu/Report/index/Mjc="
+  tr_2025_overview:   "https://edap-public.eba.europa.eu/Report/index/MjA="
+
+  # 2024 TrEx reports
+  tr_2024_capital:    "https://edap-public.eba.europa.eu/Report/index/MzA="
+  tr_2024_credit_risk: "https://edap-public.eba.europa.eu/Report/index/MzE="
+  tr_2024_npe:        "https://edap-public.eba.europa.eu/Report/index/MzI="
+
+  # P3DH (Pillar 3 Data HUB)
+  p3dh_visualisation: "https://edap-public.eba.europa.eu/Report/index/MTE1"
+  p3dh_data_points:   "https://edap-public.eba.europa.eu/Report/index/MTE2"
+
+
+# -----------------------------------------------------------------------------
+# P3DH Stress Test Disclosures
+# -----------------------------------------------------------------------------
+p3dh:
+  periods:
+    - "20251231"
+    - "20250630"
+
+  categories:
+    common_disclosures:
+      prefix: "Common Disclosures"
+      file_pattern: "{period}_common_disclosures.xlsx"
+      priority: 1
+
+    financial_disclosures:
+      prefix: "Financial Disclosures"
+      file_pattern: "{period}_financial_disclosures.xlsx"
+      priority: 2
+
+    irrbb_disclosures:
+      prefix: "IRRBB"
+      file_pattern: "{period}_irrbb_disclosures.xlsx"
+      priority: 3
+
+    mrel_disclosures:
+      prefix: "MREL"
+      file_pattern: "{period}_mrel_disclosures.xlsx"
+      priority: 4
+
+    esg_disclosures:
+      prefix: "ESG"
+      file_pattern: "{period}_esg_disclosures.xlsx"
+      priority: 5
+
+    renumeration_disclosures:
+      prefix: "Renumeration"
+      file_pattern: "{period}_renumeration_disclosures.xlsx"
+      priority: 6
+
+
+# -----------------------------------------------------------------------------
+# TrEx (EBA Transparency Exercise)
+# -----------------------------------------------------------------------------
+trex:
+  year: 2025
+
+  files:
+    tr_cre:
+      description: "Credit risk exposures"
+      filter_text: "Credit Risk"
+      file_pattern: "tr_cre.csv"
+
+    tr_oth:
+      description: "Other exposures"
+      filter_text: "Other"
+      file_pattern: "tr_oth.csv"
+
+    tr_sov:
+      description: "Sovereign exposures"
+      filter_text: "Sovereign"
+      file_pattern: "tr_sov.csv"
+
+    tr_mrk:
+      description: "Market risk"
+      filter_text: "Market Risk"
+      file_pattern: "tr_mrk.csv"
+
+
+# -----------------------------------------------------------------------------
+# Download Settings
+# -----------------------------------------------------------------------------
+settings:
+  download_delay: 5
+  max_retries: 3
+  download_timeout: 120
+  keep_screenshots: true
