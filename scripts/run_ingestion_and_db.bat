@@ -23,7 +23,13 @@ if errorlevel 1 goto :error
 call .venv\Scripts\python -m modules.historical.ecb_rates
 if errorlevel 1 goto :error
 
+call .venv\Scripts\python -m modules.historical.ecb_yield_curve
+if errorlevel 1 goto :error
+
 call .venv\Scripts\python scripts\load_ecb_rates_db.py
+if errorlevel 1 goto :error
+
+call .venv\Scripts\python scripts\load_yield_curve_db.py
 if errorlevel 1 goto :error
 
 call .venv\Scripts\python scripts\rate_assumptions.py

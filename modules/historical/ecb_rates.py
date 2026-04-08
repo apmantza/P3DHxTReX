@@ -22,9 +22,12 @@ RATES = {
 
 
 def fetch_rates(
-    start: str = "2024-01",
-    end: str = "2025-12",
+    start: str = "2020-01",
+    end: str | None = None,
 ) -> pd.DataFrame:
+    from datetime import datetime
+    if end is None:
+        end = datetime.now().strftime("%Y-%m")
     from ecbdata.api import ECB_DataPortal
 
     ecb = ECB_DataPortal()
@@ -86,6 +89,8 @@ def aggregate_to_quarterly(df: pd.DataFrame) -> pd.DataFrame:
             .reset_index()[["rate_name", "quarter", "value"]]
         )
 
+        quarterly_end = pd.Timestamp("2026-12-31")
+
         for rate_name in daily_df["rate_name"].unique():
             rate_data = latest_by_quarter[latest_by_quarter["rate_name"] == rate_name].copy()
             rate_data = rate_data.sort_values("quarter")
@@ -93,7 +98,7 @@ def aggregate_to_quarterly(df: pd.DataFrame) -> pd.DataFrame:
             all_quarters = pd.DataFrame({
                 "quarter": pd.date_range(
                     start=rate_data["quarter"].min(),
-                    end="2025-12-31",
+                    end=quarterly_end,
                     freq="QE"
                 )
             })

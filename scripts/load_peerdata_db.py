@@ -25,7 +25,8 @@ def main() -> None:
     peer_path = repo_root / "data" / "processed" / "peerdata.csv"
 
     df = pd.read_csv(peer_path, encoding="utf-8-sig", low_memory=False)
-    df["period"] = pd.to_datetime(df["period"], errors="coerce").dt.date
+    dates = pd.to_datetime(df["period"], errors="coerce").dt.date
+    df["period"] = dates.where(dates.notna(), None)
 
     df["labels_json"] = df.apply(build_labels, axis=1)
 

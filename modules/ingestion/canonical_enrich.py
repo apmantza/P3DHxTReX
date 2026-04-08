@@ -112,6 +112,12 @@ def build_canonical_enriched(
     trex_subset = trex[trex_join_cols + trex_dim_cols + trex_labels].copy()
     trex_subset = trex_subset.rename(columns={"NSA": "bank_name"})
 
+    for col in ("row", "column"):
+        if col in canonical.columns:
+            canonical[col] = canonical[col].astype(str)
+        if col in trex_subset.columns:
+            trex_subset[col] = trex_subset[col].astype(str)
+
     canonical["reference_date"] = pd.to_datetime(canonical["reference_date"], errors="coerce")
     trex_subset["reference_date"] = pd.to_datetime(trex_subset["reference_date"], errors="coerce")
 

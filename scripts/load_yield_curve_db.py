@@ -10,49 +10,63 @@ repo_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo_root))
 
 
-SERIES_MAP = {
-    "ESTER": ("ESTER", None),
-    "EURIBOR_1M": ("EURIBOR", "1M"),
-    "EURIBOR_3M": ("EURIBOR", "3M"),
-    "EURIBOR_6M": ("EURIBOR", "6M"),
-    "EURIBOR_1Y": ("EURIBOR", "1Y"),
-    "MRO": ("MRO", None),
-    "DFR": ("DFR", None),
+RATE_MAP = {
+    "SPOT_1Y":  ("YIELD_CURVE_SPOT", "1Y"),
+    "SPOT_2Y":  ("YIELD_CURVE_SPOT", "2Y"),
+    "SPOT_5Y":  ("YIELD_CURVE_SPOT", "5Y"),
+    "SPOT_10Y": ("YIELD_CURVE_SPOT", "10Y"),
+    "SPOT_15Y": ("YIELD_CURVE_SPOT", "15Y"),
+    "SPOT_20Y": ("YIELD_CURVE_SPOT", "20Y"),
+    "SPOT_30Y": ("YIELD_CURVE_SPOT", "30Y"),
+    "FWD_1Y":   ("YIELD_CURVE_FWD",  "1Y"),
+    "FWD_5Y":   ("YIELD_CURVE_FWD",  "5Y"),
+    "FWD_10Y":  ("YIELD_CURVE_FWD",  "10Y"),
+    "FWD_15Y":  ("YIELD_CURVE_FWD",  "15Y"),
+    "FWD_20Y":  ("YIELD_CURVE_FWD",  "20Y"),
+    "FWD_30Y":  ("YIELD_CURVE_FWD",  "30Y"),
 }
 
 
 def main() -> None:
     db_path = repo_root / "data" / "processed" / "bbirr.db"
-    rates_path = repo_root / "data" / "processed" / "ecb_rates_quarterly.csv"
+    yc_path = repo_root / "data" / "processed" / "ecb_yield_curve_quarterly.csv"
 
-    df = pd.read_csv(rates_path, encoding="utf-8-sig")
+    df = pd.read_csv(yc_path, encoding="utf-8-sig")
     df["quarter"] = pd.to_datetime(df["quarter"])
 
     records = []
     for _, row in df.iterrows():
         rate_name = row["rate_name"]
-        if rate_name not in SERIES_MAP:
+        if rate_name not in RATE_MAP:
             continue
-        series, tenor = SERIES_MAP[rate_name]
+        series, tenor = RATE_MAP[rate_name]
         records.append((
             row["quarter"].date(),
             series,
             tenor,
             row["value"],
-            None,  # country (EU-wide)
-            "ECB_SDW",
+            None,
+            "ECB_SDW_YC",
         ))
 
     conn = sqlite3.connect(db_path)
     try:
         conn.execute(
             """
-            DROP INDEX IF EXISTS uq_historical_rate_curves
+            CREATE TABLE IF NOT EXISTS historical_rate_curves (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date DATE,
+                series TEXT,
+                tenor TEXT,
+                rate REAL,
+                country TEXT,
+                source TEXT
+            )
             """
         )
         conn.execute(
             """
-            CREATE UNIQUE INDEX uq_historical_rate_curves
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_historical_rate_curves
             ON historical_rate_curves (date, series, tenor, country)
             """
         )
@@ -65,9 +79,8 @@ def main() -> None:
             records,
         )
         conn.commit()
-        print(f"Inserted {len(records)} rate records into historical_rate_curves")
+        print(f"Inserted {len(records)} yield curve records into historical_rate_curves")
 
-        # Show summary
         cursor = conn.execute(
             """
             SELECT series, tenor, COUNT(*) as cnt
@@ -76,7 +89,7 @@ def main() -> None:
             ORDER BY series, tenor
             """
         )
-        print("\nStored rates:")
+        print("\nStored rate series:")
         for row in cursor.fetchall():
             print(f"  {row[0]} ({row[1]}): {row[2]} quarters")
 

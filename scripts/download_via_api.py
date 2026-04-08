@@ -305,12 +305,12 @@ def modify_query(query_json: dict, template: str, max_rows: int = 100000) -> dic
     return query
 
 
-def execute_query(url: str, headers: dict, query: dict, retries: int = 5) -> dict:
+def execute_query(url: str, headers: dict, query: dict, retries: int = 5, timeout: int = 300) -> dict:
     """Execute the query and return the response, with retries for slow templates."""
     last_exc = None
     for attempt in range(1, retries + 1):
         try:
-            resp = requests.post(url, headers=headers, data=json.dumps(query), timeout=300)
+            resp = requests.post(url, headers=headers, data=json.dumps(query), timeout=timeout)
             resp.raise_for_status()
             return resp.json()
         except Exception as exc:
@@ -323,10 +323,43 @@ def execute_query(url: str, headers: dict, query: dict, retries: int = 5) -> dic
     raise last_exc
 
 
+def _parse_data_shapes_response(dsr_data: dict) -> pd.DataFrame:
+    """Parse the DataShapes response format (used by K_83.01 and other complex templates)."""
+    import json as _json
+    debug_path = PROJECT_ROOT / "data" / "raw" / "P3DH" / "_debug_datashapes.json"
+    debug_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(debug_path, "w", encoding="utf-8") as f:
+        _json.dump(dsr_data, f, ensure_ascii=False, indent=2)
+    log.info("  Dumped DataShapes debug to %s", debug_path)
+
+    rows: list[dict] = []
+    for shape in dsr_data.get("DataShapes", []):
+        tables = shape.get("Tables", []) if isinstance(shape, dict) else []
+        for table in tables:
+            if not isinstance(table, dict):
+                continue
+            columns = [col.get("DisplayName", col.get("Name", f"col{i}"))
+                       for i, col in enumerate(table.get("Columns", []))]
+            for row in table.get("Rows", []):
+                if isinstance(row, list):
+                    rows.append(dict(zip(columns, row)))
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+
 def parse_response(data: dict) -> pd.DataFrame:
     """Parse the standard Power BI DSR response into the 9-column CSV shape."""
     result = data["results"][0]["result"]["data"]
-    dsr = result["dsr"]["DS"][0]
+    dsr_data = result["dsr"]
+
+    if "DS" not in dsr_data:
+        log.warning("  Response has no 'DS' key in DSR, keys: %s", list(dsr_data.keys()))
+        if "DataShapes" in dsr_data:
+            return _parse_data_shapes_response(dsr_data)
+        return pd.DataFrame()
+
+    dsr = dsr_data["DS"][0]
     value_dicts = dsr.get("ValueDicts", {})
     g_to_d = {1: "D0", 2: "D1", 3: "D2", 5: "D5", 6: "D6", 7: "D7", 8: "D8"}
 
@@ -547,7 +580,7 @@ def download_partitioned_template(
 ) -> pd.DataFrame:
     """Download a slow template by partitioning the query over entities."""
     frames: list[pd.DataFrame] = []
-    for entity in entities:
+    for i, entity in enumerate(entities):
         query = json.loads(json.dumps(base_query))
         cmd = query["queries"][0]["Query"]["Commands"][0]["SemanticQueryDataShapeCommand"]
         cmd["Query"].setdefault("Where", []).append(
@@ -567,11 +600,17 @@ def download_partitioned_template(
                 }
             }
         )
-        response_data = execute_query(url, headers, query, retries=2)
-        frame = parse_partitioned_response(response_data)
+        response_data = execute_query(url, headers, query, retries=1)
+        try:
+            frame = parse_response(response_data)
+        except (KeyError, IndexError, TypeError):
+            try:
+                frame = parse_partitioned_response(response_data)
+            except Exception:
+                frame = pd.DataFrame()
         if not frame.empty:
             frames.append(frame)
-            log.info("  Entity %s -> %d rows", entity, len(frame))
+            log.info("  [%d/%d] Entity %s -> %d rows", i + 1, len(entities), entity, len(frame))
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
@@ -654,37 +693,21 @@ def main():
         filename = template_to_filename(template)
         output_path = output_dir / filename
 
-        if output_path.exists():
-            log.info(f"[{i+1}/{len(templates)}] Skipping {filename}")
-            continue
-
         log.info(f"[{i+1}/{len(templates)}] {template[:60]}")
 
         try:
-            if template.startswith("K_83.01"):
-                log.info("  Using partitioned fallback for K_83.01")
-                if entities is None:
-                    with sync_playwright() as p:
-                        entities = get_entities(p, date_str)
-                with sync_playwright() as p:
-                    special_capture = capture_token_and_query(p, date_str, template)
-                special_query = json.loads(special_capture["post_data"])
-                df = download_partitioned_template(
-                    special_capture["url"],
-                    special_capture["headers"],
-                    special_query,
-                    entities,
-                )
-            else:
-                modified_query = modify_query(original_query, template, max_rows=100000)
-                response_data = execute_query(url, headers, modified_query)
-                df = parse_response(response_data)
+            modified_query = modify_query(original_query, template, max_rows=100000)
+            response_data = execute_query(url, headers, modified_query, retries=2, timeout=120)
+            df = parse_response(response_data)
+            if df.empty:
+                raise ValueError("Standard parse returned empty DataFrame")
 
             df.to_csv(output_path, index=False, encoding="utf-8-sig")
             log.info(f"  Saved: {len(df)} rows -> {filename}")
 
         except Exception as e:
-            log.error(f"  Failed: {e}")
+            log.error(f"  Failed: {e} (K_83.01 partitioned fallback not yet implemented)")
+            df = pd.DataFrame()
 
     log.info("Done!")
 
