@@ -122,7 +122,9 @@ def normalize_p3dh_export(excel_path: str | Path) -> pd.DataFrame:
     )
 
     normalized = normalized[normalized["fact_value"].notna()].copy()
-    normalized["reference_date"] = pd.to_datetime(normalized["reference_date"], errors="coerce")
+    normalized["reference_date"] = pd.to_datetime(
+        normalized["reference_date"], errors="coerce"
+    )
     normalized["fact_value"] = pd.to_numeric(normalized["fact_value"], errors="coerce")
 
     ref_date = extract_reference_date_from_path(excel_path)
@@ -132,8 +134,39 @@ def normalize_p3dh_export(excel_path: str | Path) -> pd.DataFrame:
     return normalized
 
 
+def _extract_template_from_filename(filename: str) -> str | None:
+    """Extract template code like 'K_68.00' from filename like 'K_68.00_data_points.csv'."""
+    match = re.match(r"(K_\d{2}\.\d{2})_data_points", filename)
+    return match.group(1) if match else None
+
+
+def _is_lei_format(frame: pd.DataFrame) -> bool:
+    """Detect whether the CSV uses the LEI format where Entity column contains LEI codes.
+
+    Since late 2024, EBA P3DH API CSVs shifted to a format where:
+      Entity = LEI code (20-char alphanumeric), not bank name
+      Country = Bank name (not the country)
+      Module = Actual country (not the module name)
+      Cell = Module name like 'IRRBB disclosures' (not {K_xx, rYY, cZZ})
+    """
+    if "Entity" not in frame.columns:
+        return False
+    entity_col = frame["Entity"].dropna().astype(str).str.strip()
+    if entity_col.empty:
+        return False
+    # Check first 10 non-empty entities: if most look like LEIs (20-char alphanumeric), it's LEI format
+    sample = entity_col.head(10)
+    lei_match = sample.str.fullmatch(r"[A-Z0-9]{20}")
+    return lei_match.sum() >= len(sample) * 0.5
+
+
 def normalize_p3dh_api_csv(csv_path: str | Path) -> pd.DataFrame:
-    """Normalize API-downloaded P3DH CSV files into the common long schema."""
+    """Normalize API-downloaded P3DH CSV files into the common long schema.
+
+    Handles two formats:
+    1. Legacy format: Entity=BankName, Country=Country, Module=ModuleName, Cell={K_xx, rYY, cZZ}
+    2. LEI format (since late 2024): Entity=LEI, Country=BankName, Module=Country, Cell=ModuleName
+    """
     path = as_path(csv_path)
     require_paths([path])
 
@@ -141,6 +174,18 @@ def normalize_p3dh_api_csv(csv_path: str | Path) -> pd.DataFrame:
     if frame.empty:
         return pd.DataFrame()
 
+    lei_format = _is_lei_format(frame)
+
+    if lei_format:
+        return _normalize_p3dh_api_csv_lei_format(frame, path)
+    else:
+        return _normalize_p3dh_api_csv_legacy_format(frame, path)
+
+
+def _normalize_p3dh_api_csv_legacy_format(
+    frame: pd.DataFrame, path: Path
+) -> pd.DataFrame:
+    """Normalize legacy-format P3DH CSV where Entity=BankName, Country=Country."""
     normalized = frame.rename(
         columns={
             "Entity": "entity_name",
@@ -155,22 +200,56 @@ def normalize_p3dh_api_csv(csv_path: str | Path) -> pd.DataFrame:
         }
     ).copy()
 
-    for col in ["entity_name", "country", "module_name", "cell", "row", "row_name", "column", "column_name"]:
+    for col in [
+        "entity_name",
+        "country",
+        "module_name",
+        "cell",
+        "row",
+        "row_name",
+        "column",
+        "column_name",
+    ]:
         if col in normalized.columns:
             normalized[col] = normalized[col].astype("string")
 
-    normalized["template"] = normalized.get("cell", pd.Series(index=normalized.index)).map(_extract_template_from_cell)
-    normalized["row"] = normalized["row"].where(normalized["row"].notna() & (normalized["row"].astype(str).str.strip() != ""), normalized["cell"].map(_extract_row_from_cell))
-    normalized["column"] = normalized["column"].where(normalized["column"].notna() & (normalized["column"].astype(str).str.strip() != ""), normalized["cell"].map(_extract_column_from_cell))
+    normalized["template"] = normalized.get(
+        "cell", pd.Series(index=normalized.index)
+    ).map(_extract_template_from_cell)
+    normalized["row"] = normalized["row"].where(
+        normalized["row"].notna() & (normalized["row"].astype(str).str.strip() != ""),
+        normalized["cell"].map(_extract_row_from_cell),
+    )
+    normalized["column"] = normalized["column"].where(
+        normalized["column"].notna()
+        & (normalized["column"].astype(str).str.strip() != ""),
+        normalized["cell"].map(_extract_column_from_cell),
+    )
 
     normalized["template"] = normalized["template"].astype("string")
 
     normalized["entity_name"] = normalized["entity_name"].ffill()
-    normalized["country"] = normalized.groupby("entity_name", dropna=False)["country"].ffill().bfill()
-    normalized["module_name"] = normalized.groupby("entity_name", dropna=False)["module_name"].ffill().bfill()
-    normalized["template"] = normalized.groupby("entity_name", dropna=False)["template"].ffill().bfill()
-    normalized["row_name"] = normalized.groupby(["entity_name", "template", "row"], dropna=False)["row_name"].ffill().bfill()
-    normalized["column_name"] = normalized.groupby(["entity_name", "template", "column"], dropna=False)["column_name"].ffill().bfill()
+    normalized["country"] = (
+        normalized.groupby("entity_name", dropna=False)["country"].ffill().bfill()
+    )
+    normalized["module_name"] = (
+        normalized.groupby("entity_name", dropna=False)["module_name"].ffill().bfill()
+    )
+    normalized["template"] = (
+        normalized.groupby("entity_name", dropna=False)["template"].ffill().bfill()
+    )
+    normalized["row_name"] = (
+        normalized.groupby(["entity_name", "template", "row"], dropna=False)["row_name"]
+        .ffill()
+        .bfill()
+    )
+    normalized["column_name"] = (
+        normalized.groupby(["entity_name", "template", "column"], dropna=False)[
+            "column_name"
+        ]
+        .ffill()
+        .bfill()
+    )
 
     normalized["row"] = normalized["row"].map(_normalize_code)
     normalized["column"] = normalized["column"].map(_normalize_code)
@@ -211,7 +290,171 @@ def normalize_p3dh_api_csv(csv_path: str | Path) -> pd.DataFrame:
     return normalized
 
 
+def _normalize_p3dh_api_csv_lei_format(frame: pd.DataFrame, path: Path) -> pd.DataFrame:
+    """Normalize LEI-format P3DH CSV where Entity=LEI, Country=BankName, Module=Country, Cell=ModuleName.
+
+    The EBA P3DH API shifted to a new CSV format where:
+      Entity  = 20-char LEI code (not bank name)
+      Country = Bank name (not the country)
+      Module  = Actual country (not module name)
+      Cell    = Module name like 'IRRBB disclosures' (not {K_xx, rYY, cZZ})
+      Row     = 0-based row index (not row code like r0010)
+      RowName = Usually empty; row labels appear in ColumnName
+
+    This function remaps columns to the standard schema and derives the template
+    code from the filename (e.g., K_68.00_data_points.csv -> K_68.00).
+    """
+    # Derive template code from filename (e.g., K_68.00_data_points.csv -> K_68.00)
+    template_code = _extract_template_from_filename(path.name)
+
+    # Remap LEI-format columns to our canonical schema
+    normalized = frame.rename(
+        columns={
+            "Entity": "lei",  # LEI code (keep as separate field)
+            "Country": "entity_name",  # Bank name is in the Country column
+            "Module": "country",  # Actual country is in the Module column
+            "Cell": "module_name",  # Module name (like 'IRRBB disclosures')
+            "Row": "row_index",  # 0-based index (not usable as row code)
+            "RowName": "row_name",
+            "Column": "column",
+            "ColumnName": "column_name",
+            "FactValue": "fact_value",
+        }
+    ).copy()
+
+    # Drop original columns we renamed from, if they still exist
+    for drop_col in ["entity_name_orig", "country_orig"]:
+        if drop_col in normalized.columns:
+            normalized.drop(columns=[drop_col], inplace=True)
+
+    for col in [
+        "lei",
+        "entity_name",
+        "country",
+        "module_name",
+        "row_name",
+        "column",
+        "column_name",
+    ]:
+        if col in normalized.columns:
+            normalized[col] = normalized[col].astype("string")
+
+    # Fill entity_name and country per LEI group since CSV has these per-entity header rows
+    normalized["entity_name"] = normalized["entity_name"].ffill()
+    normalized["country"] = (
+        normalized.groupby("lei", dropna=False)["country"].ffill().bfill()
+    )
+    normalized["module_name"] = (
+        normalized.groupby("lei", dropna=False)["module_name"].ffill().bfill()
+    )
+
+    # Template: use filename-derived code for all rows in this file
+    normalized["template"] = template_code
+
+    # Column codes: these come as 4-digit strings in the CSV ('0010', '0020', etc.)
+    # Some rows have empty columns (label rows)
+    normalized["column"] = normalized["column"].map(_normalize_code)
+
+    # Row codes: in LEI format, Row is a 0-based index, not a code.
+    # We keep it as-is for now (normalized) but it's not the canonical row code.
+    # The actual row code should be derived from row_name patterns or the data dictionary.
+    # For now, convert the index to a zero-padded string.
+    normalized["row_index"] = normalized["row_index"].map(_normalize_code)
+    # Use row_index as row code placeholder (will be enhanced when matching data dict)
+    normalized["row"] = normalized["row_index"]
+
+    # Forward-fill row_name and column_name within entity groups
+    normalized["row_name"] = normalized.groupby(["lei", "template"], dropna=False)[
+        "row_name"
+    ].ffill()
+    normalized["column_name"] = normalized.groupby(["lei", "template"], dropna=False)[
+        "column_name"
+    ].ffill()
+
+    # Some row_name values contain the template code (e.g., 'K_30.04 - EU REM4 - ...')
+    # These are label rows; set their template from the row_name if different from filename
+    # (This handles mixed-modules common-disclosure CSVs)
+    normalized["row_name_template"] = normalized["row_name"].map(
+        _extract_row_name_template
+    )
+
+    # Type conversions
+    normalized["entity_name"] = normalized["entity_name"].astype(object)
+    normalized["country"] = normalized["country"].astype(object)
+    normalized["module_name"] = normalized["module_name"].astype(object)
+    normalized["template"] = normalized["template"].astype(object)
+    normalized["row"] = normalized["row"].astype(object)
+    normalized["row_name"] = normalized["row_name"].astype(object)
+    normalized["column"] = normalized["column"].astype(object)
+    normalized["column_name"] = normalized["column_name"].astype(object)
+
+    # Build cell value: in LEI format we don't have {K_xx, rYY, cZZ}
+    # Use a synthetic cell from template + row + column
+    normalized["cell"] = normalized.apply(
+        lambda r: (
+            f"{{{r['template']}, r{r['row']}, c{r['column']}}}"
+            if pd.notna(r["template"]) and pd.notna(r["row"]) and pd.notna(r["column"])
+            else None
+        ),
+        axis=1,
+    )
+    normalized["cell"] = normalized["cell"].astype(object)
+
+    normalized["open_key"] = pd.NA
+    normalized["sheet"] = pd.NA
+
+    ref_date = extract_reference_date_from_path(path)
+    normalized["reference_date"] = pd.to_datetime(ref_date, errors="coerce")
+    normalized["fact_value"] = pd.to_numeric(normalized["fact_value"], errors="coerce")
+
+    # Select final columns (drop lei and helper columns)
+    normalized = normalized[
+        [
+            "entity_name",
+            "country",
+            "module_name",
+            "cell",
+            "open_key",
+            "template",
+            "row",
+            "row_name",
+            "column",
+            "column_name",
+            "sheet",
+            "reference_date",
+            "fact_value",
+        ]
+    ].copy()
+
+    normalized = normalized[normalized["fact_value"].notna()].copy()
+    return normalized
+
+
+def _extract_row_name_template(row_name: str) -> str | None:
+    """Extract template code from row_name like 'K_30.04 - EU REM4 - ...'."""
+    if row_name is None or pd.isna(row_name):
+        return None
+    match = re.match(r"(K_\d{2}\.\d{2})\s*-", str(row_name).strip())
+    return match.group(1) if match else None
+
+
 def scan_p3dh_directory(p3dh_dir: str | Path) -> Iterator[tuple[Path, pd.DataFrame]]:
+    """Scan directory for legacy Excel and API CSV P3DH exports."""
+    dir_path = as_path(p3dh_dir)
+
+    for xlsx_file in sorted(dir_path.rglob("*.xlsx")):
+        try:
+            df = normalize_p3dh_export(xlsx_file)
+            yield xlsx_file.name, df
+        except Exception as e:
+            print(f"Skipping {xlsx_file.name}: {e}")
+
+    for csv_file in sorted(dir_path.rglob("*.csv")):
+        try:
+            df = normalize_p3dh_api_csv(csv_file)
+            yield csv_file.relative_to(dir_path), df
+        except Exception as e:
+            print(f"Skipping {csv_file.name}: {e}")
     """Scan directory for legacy Excel and API CSV P3DH exports."""
     dir_path = as_path(p3dh_dir)
 
@@ -255,11 +498,7 @@ def build_p3dh_key(frame: pd.DataFrame) -> pd.Series:
     missing = [col for col in key_cols if col not in frame.columns]
     if missing:
         raise ValueError(f"Missing key columns for P3DH: {', '.join(missing)}")
-    return (
-        frame[key_cols]
-        .astype(str)
-        .agg("|".join, axis=1)
-    )
+    return frame[key_cols].astype(str).agg("|".join, axis=1)
 
 
 def with_key_column(frame: pd.DataFrame) -> pd.DataFrame:
@@ -318,7 +557,9 @@ def export_skipped_keys(
         return 0
     skipped = with_key_column(skipped)
     out = as_path(output_path)
-    skipped[["p3dh_key"]].drop_duplicates().to_csv(out, index=False, encoding="utf-8-sig")
+    skipped[["p3dh_key"]].drop_duplicates().to_csv(
+        out, index=False, encoding="utf-8-sig"
+    )
     return len(skipped.index)
 
 
@@ -358,25 +599,29 @@ def upsert_p3dh_sqlite(
             )
             """
         )
-        conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_refdate ON {table_name}(reference_date)")
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{table_name}_refdate ON {table_name}(reference_date)"
+        )
 
         before = conn.total_changes
-        records = keyed[[
-            "p3dh_key",
-            "entity_name",
-            "country",
-            "module_name",
-            "cell",
-            "open_key",
-            "template",
-            "row",
-            "row_name",
-            "column",
-            "column_name",
-            "sheet",
-            "reference_date",
-            "fact_value",
-        ]].itertuples(index=False, name=None)
+        records = keyed[
+            [
+                "p3dh_key",
+                "entity_name",
+                "country",
+                "module_name",
+                "cell",
+                "open_key",
+                "template",
+                "row",
+                "row_name",
+                "column",
+                "column_name",
+                "sheet",
+                "reference_date",
+                "fact_value",
+            ]
+        ].itertuples(index=False, name=None)
 
         conn.executemany(
             f"""

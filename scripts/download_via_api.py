@@ -7,6 +7,7 @@ with different template filters and increased row limits.
 Usage:
     .venv/Scripts/python scripts/download_via_api.py [--date 31/12/2025]
 """
+
 from __future__ import annotations
 
 import json
@@ -53,7 +54,9 @@ def _click_option_by_text(frame, text: str) -> None:
 
 def _set_reference_date(frame, date_str: str) -> None:
     """Set the reference date without waiting on flaky virtualized clicks."""
-    frame.locator('[aria-label="ReferenceDate"][role="combobox"]').click(no_wait_after=True)
+    frame.locator('[aria-label="ReferenceDate"][role="combobox"]').click(
+        no_wait_after=True
+    )
     time.sleep(2)
     _click_option_by_text(frame, date_str)
     time.sleep(1)
@@ -142,7 +145,9 @@ def get_available_dates(p) -> list[str]:
     time.sleep(10)
 
     frame = get_powerbi_frame(page)
-    frame.locator('[aria-label="ReferenceDate"][role="combobox"]').click(no_wait_after=True)
+    frame.locator('[aria-label="ReferenceDate"][role="combobox"]').click(
+        no_wait_after=True
+    )
     time.sleep(2)
 
     dates = []
@@ -201,9 +206,134 @@ def capture_token_and_query(p, date_str: str, template: str) -> dict:
     return captured
 
 
+# Known P3DH templates (last refreshed 2026-04-16). Used as fallback if browser discovery fails.
+KNOWN_TEMPLATES = [
+    "K_00.02 - Accompanying narrative CODIS",
+    "K_01.00 - Template EU CAE1 – Exposures to crypto-assets",
+    "K_02.00 - EU CCR1 – Analysis of CCR exposure by approach",
+    "K_03.00 - EU CCR3 – Standardised approach – CCR exposures by regulator",
+    "K_04.00 - EU CCR4 – IRB approach – CCR exposures by exposure class and",
+    "K_05.00 - EU CCR5 – Composition of collateral for CCR exposures",
+    "K_06.00 - EU CCR6 – Credit derivatives exposures",
+    "K_07.00 - EU CCR7 – RWEA flow statements of CCR exposures under the IM",
+    "K_08.00 - EU CCR8 – Exposures to CCPs",
+    "K_09.01 - EU-SEC1 - Securitisation exposures in the non-trading book",
+    "K_09.02 - EU-SEC2 - Securitisation exposures in the trading book",
+    "K_09.03 - EU-SEC3 - Securitisation exposures in the non-trading book a",
+    "K_09.04 - EU-SEC4 - Securitisation exposures in the non-trading book a",
+    "K_09.05 - EU-SEC5 - Exposures securitised by the institution - Exposur",
+    "K_10.00 - EU MR1 - Market risk under the standardised approach",
+    "K_101.00 - Section 2- total exposures",
+    "K_102.00 - Section 3 - Intra-Financial System Assets",
+    "K_103.00 - Section 4 - Intra-Financial System Liabilities",
+    "K_104.00 - Section 5 - Securities Outstanding",
+    "K_105.00 - Section 6 - Payments made in the reporting year excluding i",
+    "K_106.00 - Section 7 - Assets Under Custody",
+    "K_108.00 - Section 9 - Trading Volume",
+    "K_109.00 - Section 10 - Notional Amount of Over-the-Counter OTC Deriva",
+    "K_11.00 - EU MR2-A - Market risk under the internal Model Approach (IM",
+    "K_110.00 - Section 11 - Trading and Available-for-Sale Securities",
+    "K_111.00 - Section 12 - Level 3 Assets",
+    "K_112.00 - Section 13 - Cross-Jurisdictional Claims",
+    "K_113.00 - Section 14 - Cross-Jurisdictional Liabilities",
+    "K_12.00 - EU MR2-B - RWEA flow statements of market risk exposures unde",
+    "K_13.00 - EU MR3 - IMA values for trading portfolios",
+    "K_18.01 - EU CVA 1 – Credit valuation adjustment risk under the Reduce",
+    "K_18.02 - EU CVA 2 – Credit valuation adjustment risk under the Full B",
+    "K_18.03 - EU CVA3 – Credit valuation adjustment risk under the Standar",
+    "K_18.04 - EU CVA4 – RWEA flow statements of credit valuation adjustmen",
+    "K_19.01 - EU OR1 -Operational risk losses",
+    "K_19.02 - EU OR2 - Business Indicator, components and subcomponents",
+    "K_19.03 - EU OR3 - Operational risk own funds requirements and risk ex",
+    "K_20.01 - EU AE1 - Encumbered and unencumbered assets",
+    "K_20.02 - EU AE2 - Collateral received and own debt securities issued",
+    "K_20.03 - EU AE3 - Sources   of  encumbrance",
+    "K_21.01 - EU CR1: Performing and non-performing exposures and related",
+    "K_21.02 - EU CR1-A: Maturity of exposures",
+    "K_22.01 - EU CR2: Changes in the stock of non-performing loans and adv",
+    "K_22.02 - EU CR2a: Changes in the stock of non-performing loans and ad",
+    "K_23.00 - EU CR3 –  CRM techniques overview:  Disclosure of the use of",
+    "K_24.00 - EU CR4 – standardised approach – Credit risk exposure and CR",
+    "K_25.00 - EU CR5 – standardised approach",
+    "K_26.00 - EU CR6 – IRB approach – Credit risk exposures by exposure cl",
+    "K_26.01 - EU CR6-A – Scope of the use of IRB and SA approaches",
+    "K_27.01 - EU CR7 – IRB approach – Effect on the RWEAs of credit deriva",
+    "K_27.02 - EU CR7-A – IRB approach – Disclosure of the extent of the us",
+    "K_28.00 - EU CR8 –  RWEA flow statements of credit risk exposures unde",
+    "K_29.00 - EU CR9 –IRB approach – Back-testing of PD per exposure clas",
+    "K_29.01 - EU CR9.1 – IRB approach – Back-testing of PD per exposure cl",
+    "K_29.02 - EU CR10 –  Specialised lending and equity exposures under th",
+    "K_30.01 - EU REM1 - Remuneration awarded for the financial year",
+    "K_30.02 - EU REM2 - Special payments  to staff whose professional acti",
+    "K_30.03 - EU REM3 - Deferred remuneration",
+    "K_30.04 - EU REM4 - Remuneration of 1 million EUR or more per year",
+    "K_30.05 - EU REM5 - Information on remuneration of staff whose profess",
+    "K_41.00 - Template 1 - Banking book- Indicators of potential climate C",
+    "K_42.00 - Template 2 - Banking book - Indicators of potential climate",
+    "K_43.00 - Template 3 - Banking book - Indicators of potential climate",
+    "K_44.00 - Template 4 - Banking book - Indicators of potential climate",
+    "K_45.00 - Template 5 - Banking book - Indicators of potential climate",
+    "K_46.00 - Template 6 - Summary of GAR KPIs",
+    "K_47.00 - Template 7 - Mitigating actions: Assets for the calculation",
+    "K_48.00 - Template 8 - GAR (%)",
+    "K_49.01 - Template 9.1 - Mitigating actions: Assets for the calculatio",
+    "K_49.02 - Template 9.2 - BTAR %",
+    "K_49.03 - Template 9.3 - Summary table - BTAR %",
+    "K_50.00 - Template 10 - Other climate change mitigating actions that a",
+    "K_60.00 - EU OV1 – Overview of total risk exposure amounts",
+    "K_61.00 - EU KM1 - Key metrics template",
+    "K_62.01 - EU INS1 - Insurance participations",
+    "K_62.02 - EU INS2 - Financial conglomerates information on own funds a",
+    "K_63.01 - EU CMS1 – Comparison of modelled and standardised risk weigh",
+    "K_63.02 - EU CMS2 – Comparison of modelled and standardised risk weigh",
+    "K_64.01 - EU LI1 - Differences between the accounting scope and the sc",
+    "K_64.03 - EU LI2 - Main sources of differences between regulatory expo",
+    "K_65.00 - EU PV1: Prudent valuation adjustments (PVA)",
+    "K_66.01 - EU CC1 - Composition of regulatory own funds",
+    "K_66.02 - EU CC2 - reconciliation of regulatory own funds to balance s",
+    "K_67.01 - EU CCyB1 - Geographical distribution of credit exposures rel",
+    "K_67.02 - EU CCyB2 - Amount of institution-specific countercyclical ca",
+    "K_68.00 - EU IRRBB1 - Interest rate risks of non-trading book activiti",
+    "K_00.04 - Accompanying narrative IRRBBDIS",
+    "K_70.00 - EU LR1 - LRSum: Summary reconciliation of accounting assets",
+    "K_71.00 -  EU LR2 - LRCom: Leverage ratio common disclosure",
+    "K_72.00 - EU LR3 - LRSpl: Split-up of on balance sheet exposures (excl",
+    "K_73.00 - EU LIQ1 - Quantitative information of LCR",
+    "K_74.00 - EU LIQ2: Net Stable Funding Ratio",
+    "K_80.00 - EU CQ1: Credit quality of forborne exposures",
+    "K_81.00 - EU CQ2: Quality of forbearance",
+    "K_82.00 - EU CQ3: Credit quality of performing and non-performing expo",
+    "K_83.01 - EU CQ4: Quality of non-performing exposures by geography",
+    "K_84.01 - EU CQ5: Credit quality of loans and advances by industry",
+    "K_85.00 - EU CQ6: Collateral valuation - loans and advances",
+    "K_86.00 - EU CQ7: Collateral obtained by taking possession and executi",
+    "K_87.00 - EU CQ8: Collateral obtained by taking possession and executi",
+    "K_90.01 - EU KM2 - Key metrics - MREL and, where applicable, G-SII req",
+    "K_91.00 - EU TLAC1 - Composition - MREL and, where applicable, G-SII r",
+    "K_93.00 - EU ILAC - Internal loss absorbing capacity: internal MREL an",
+    "K_95.00 - Creditor ranking - Entity that is not a resolution entity",
+    "K_96.00 - EU TLAC2b: Creditor ranking - Entity that is not a resolutio",
+    "K_97.00 - EU TLAC3 - creditor ranking - resolution entity",
+    "K_98.00 - EU TLAC3b: creditor ranking - resolution entity",
+]
+
+
 def get_templates(p, date_str: str) -> list[str]:
-    """Get list of available templates (scrolls through virtual list)."""
-    from playwright.sync_api import sync_playwright
+    """Get list of available templates (scrolls through virtual list).
+    Falls back to KNOWN_TEMPLATES if browser discovery fails.
+    """
+    try:
+        return _get_templates_from_browser(p, date_str)
+    except Exception as e:
+        log.warning(
+            "Browser template discovery failed: %s — using known template list", e
+        )
+        return list(KNOWN_TEMPLATES)
+
+
+def _get_templates_from_browser(p, date_str: str) -> list[str]:
+    """Get list of available templates by scrolling through the virtual dropdown."""
+    import re
 
     browser = p.chromium.connect_over_cdp(CDP_URL)
     page = browser.contexts[0].new_page()
@@ -223,7 +353,6 @@ def get_templates(p, date_str: str) -> list[str]:
     popup_id = dd.get_attribute("aria-controls")
     all_templates = set()
 
-    import re
     for scroll_y in range(0, 10000, 200):
         frame.evaluate(f"""
             (() => {{
@@ -234,7 +363,10 @@ def get_templates(p, date_str: str) -> list[str]:
         time.sleep(0.3)
 
         for opt in frame.locator(f'#{popup_id} [role="option"]').all():
-            text = opt.text_content().strip()
+            try:
+                text = opt.text_content(timeout=5000).strip()
+            except Exception:
+                continue
             if text and text != "Select all" and re.match(r"^K_", text):
                 all_templates.add(text)
 
@@ -300,17 +432,23 @@ def modify_query(query_json: dict, template: str, max_rows: int = 100000) -> dic
         if "DataReduction" in cmd["Binding"]:
             if "Primary" in cmd["Binding"]["DataReduction"]:
                 if "Window" in cmd["Binding"]["DataReduction"]["Primary"]:
-                    cmd["Binding"]["DataReduction"]["Primary"]["Window"]["Count"] = max_rows
+                    cmd["Binding"]["DataReduction"]["Primary"]["Window"]["Count"] = (
+                        max_rows
+                    )
 
     return query
 
 
-def execute_query(url: str, headers: dict, query: dict, retries: int = 5, timeout: int = 300) -> dict:
+def execute_query(
+    url: str, headers: dict, query: dict, retries: int = 5, timeout: int = 300
+) -> dict:
     """Execute the query and return the response, with retries for slow templates."""
     last_exc = None
     for attempt in range(1, retries + 1):
         try:
-            resp = requests.post(url, headers=headers, data=json.dumps(query), timeout=timeout)
+            resp = requests.post(
+                url, headers=headers, data=json.dumps(query), timeout=timeout
+            )
             resp.raise_for_status()
             return resp.json()
         except Exception as exc:
@@ -318,7 +456,12 @@ def execute_query(url: str, headers: dict, query: dict, retries: int = 5, timeou
             if attempt == retries:
                 break
             wait_s = attempt * 2
-            log.warning("  Query attempt %d/%d failed, retrying in %ss", attempt, retries, wait_s)
+            log.warning(
+                "  Query attempt %d/%d failed, retrying in %ss",
+                attempt,
+                retries,
+                wait_s,
+            )
             time.sleep(wait_s)
     raise last_exc
 
@@ -326,6 +469,7 @@ def execute_query(url: str, headers: dict, query: dict, retries: int = 5, timeou
 def _parse_data_shapes_response(dsr_data: dict) -> pd.DataFrame:
     """Parse the DataShapes response format (used by K_83.01 and other complex templates)."""
     import json as _json
+
     debug_path = PROJECT_ROOT / "data" / "raw" / "P3DH" / "_debug_datashapes.json"
     debug_path.parent.mkdir(parents=True, exist_ok=True)
     with open(debug_path, "w", encoding="utf-8") as f:
@@ -338,8 +482,10 @@ def _parse_data_shapes_response(dsr_data: dict) -> pd.DataFrame:
         for table in tables:
             if not isinstance(table, dict):
                 continue
-            columns = [col.get("DisplayName", col.get("Name", f"col{i}"))
-                       for i, col in enumerate(table.get("Columns", []))]
+            columns = [
+                col.get("DisplayName", col.get("Name", f"col{i}"))
+                for i, col in enumerate(table.get("Columns", []))
+            ]
             for row in table.get("Rows", []):
                 if isinstance(row, list):
                     rows.append(dict(zip(columns, row)))
@@ -354,7 +500,9 @@ def parse_response(data: dict) -> pd.DataFrame:
     dsr_data = result["dsr"]
 
     if "DS" not in dsr_data:
-        log.warning("  Response has no 'DS' key in DSR, keys: %s", list(dsr_data.keys()))
+        log.warning(
+            "  Response has no 'DS' key in DSR, keys: %s", list(dsr_data.keys())
+        )
         if "DataShapes" in dsr_data:
             return _parse_data_shapes_response(dsr_data)
         return pd.DataFrame()
@@ -469,7 +617,9 @@ def parse_partitioned_response(data: dict) -> pd.DataFrame:
     for sel in result["descriptor"]["Select"]:
         value = sel.get("Value", "")
         if isinstance(value, str) and value.startswith("G"):
-            field = canonical_field(sel.get("NativeReferenceName") or sel.get("Name", "").split(".")[-1])
+            field = canonical_field(
+                sel.get("NativeReferenceName") or sel.get("Name", "").split(".")[-1]
+            )
             if field:
                 g_to_field[int(value[1:])] = field
 
@@ -568,7 +718,9 @@ def parse_partitioned_response(data: dict) -> pd.DataFrame:
         return frame
     frame = frame[frame["Cell"].astype(str).str.strip() != ""].copy()
     if "ReferenceDate" in frame.columns:
-        frame["ReferenceDate"] = pd.to_datetime(frame["ReferenceDate"], unit="ms", errors="coerce").dt.strftime("%Y-%m-%d")
+        frame["ReferenceDate"] = pd.to_datetime(
+            frame["ReferenceDate"], unit="ms", errors="coerce"
+        ).dt.strftime("%Y-%m-%d")
     return frame
 
 
@@ -582,7 +734,9 @@ def download_partitioned_template(
     frames: list[pd.DataFrame] = []
     for i, entity in enumerate(entities):
         query = json.loads(json.dumps(base_query))
-        cmd = query["queries"][0]["Query"]["Commands"][0]["SemanticQueryDataShapeCommand"]
+        cmd = query["queries"][0]["Query"]["Commands"][0][
+            "SemanticQueryDataShapeCommand"
+        ]
         cmd["Query"].setdefault("Where", []).append(
             {
                 "Condition": {
@@ -610,7 +764,13 @@ def download_partitioned_template(
                 frame = pd.DataFrame()
         if not frame.empty:
             frames.append(frame)
-            log.info("  [%d/%d] Entity %s -> %d rows", i + 1, len(entities), entity, len(frame))
+            log.info(
+                "  [%d/%d] Entity %s -> %d rows",
+                i + 1,
+                len(entities),
+                entity,
+                len(frame),
+            )
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
@@ -648,8 +808,8 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     log.info("Using reference date %s", date_str)
 
-    # Step 1: Capture token and query
-    log.info("Capturing API token from browser...")
+    # Step 1: Get template list from browser
+    log.info("Discovering templates from browser...")
     with sync_playwright() as p:
         seed_templates = get_templates(p, date_str)
 
@@ -688,26 +848,63 @@ def main():
 
     entities: list[str] | None = None
 
+    # Known slow/large templates that need longer timeouts or partitioning
+    SLOW_TEMPLATES = {"K_83.01"}
+    LARGE_TIMEOUT = 600  # 10 minutes for slow templates
+
     # Step 3: Download each template via API
     for i, template in enumerate(templates):
+        template_code = template.split(" - ")[0].strip()
         filename = template_to_filename(template)
         output_path = output_dir / filename
 
-        log.info(f"[{i+1}/{len(templates)}] {template[:60]}")
+        log.info(f"[{i + 1}/{len(templates)}] {template[:60]}")
 
         try:
             modified_query = modify_query(original_query, template, max_rows=100000)
-            response_data = execute_query(url, headers, modified_query, retries=2, timeout=120)
-            df = parse_response(response_data)
+            timeout = LARGE_TIMEOUT if template_code in SLOW_TEMPLATES else 120
+            response_data = execute_query(
+                url, headers, modified_query, retries=3, timeout=timeout
+            )
+            # Try standard parser first, then partitioned parser as fallback
+            df = pd.DataFrame()
+            try:
+                df = parse_response(response_data)
+            except Exception:
+                pass
             if df.empty:
-                raise ValueError("Standard parse returned empty DataFrame")
+                try:
+                    df = parse_partitioned_response(response_data)
+                except Exception:
+                    pass
+            if df.empty:
+                raise ValueError("Both parsers returned empty DataFrame")
 
             df.to_csv(output_path, index=False, encoding="utf-8-sig")
             log.info(f"  Saved: {len(df)} rows -> {filename}")
 
         except Exception as e:
-            log.error(f"  Failed: {e} (K_83.01 partitioned fallback not yet implemented)")
-            df = pd.DataFrame()
+            log.warning(f"  Standard download failed: {e}")
+
+            # Fallback: partition by entity for slow/large/failed templates
+            log.info("  Attempting entity-partitioned fallback...")
+            try:
+                if entities is None:
+                    with sync_playwright() as p:
+                        entities = get_entities(p, date_str)
+                    log.info(f"  Found {len(entities)} entities for partitioning")
+                df = download_partitioned_template(
+                    url, headers, modified_query, entities
+                )
+                if not df.empty:
+                    df.to_csv(output_path, index=False, encoding="utf-8-sig")
+                    log.info(f"  Saved via partitioned: {len(df)} rows -> {filename}")
+                else:
+                    log.error(
+                        f"  Partitioned fallback returned empty for {template_code}"
+                    )
+            except Exception as e2:
+                log.error(f"  Partitioned fallback also failed: {e2}")
 
     log.info("Done!")
 
