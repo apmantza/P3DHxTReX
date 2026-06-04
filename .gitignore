@@ -1,4 +1,5 @@
 .venv/
+.pi-lens/
 .chrome-cdp-skill/
 .chrome-debug-profile/
 .claude/

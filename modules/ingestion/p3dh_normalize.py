@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, cast
 
 import pandas as pd
 
@@ -38,28 +39,38 @@ def extract_reference_date_from_path(path: str | Path) -> str | None:
 
 
 def _extract_template_from_cell(cell_value: str | float | int | None) -> str | None:
-    if cell_value is None or pd.isna(cell_value):
+    if cell_value is None or cell_value is pd.NA:
         return None
-    match = re.search(r"\{\s*(K_[0-9]{2}\.[0-9]{2})\s*,", str(cell_value))
+    if isinstance(cell_value, float) and math.isnan(cell_value):
+        return None
+    match = re.search(
+        r"\{\s*(K_[0-9]{2}\.[0-9]{2}(?:\.[a-z0-9]+)?)\s*,", str(cell_value)
+    )
     return match.group(1) if match else None
 
 
 def _extract_row_from_cell(cell_value: str | float | int | None) -> str | None:
-    if cell_value is None or pd.isna(cell_value):
+    if cell_value is None or cell_value is pd.NA:
+        return None
+    if isinstance(cell_value, float) and math.isnan(cell_value):
         return None
     match = re.search(r",\s*r(\d{4})\s*,", str(cell_value))
     return match.group(1) if match else None
 
 
 def _extract_column_from_cell(cell_value: str | float | int | None) -> str | None:
-    if cell_value is None or pd.isna(cell_value):
+    if cell_value is None or cell_value is pd.NA:
+        return None
+    if isinstance(cell_value, float) and math.isnan(cell_value):
         return None
     match = re.search(r",\s*c(\d{4})\s*\}", str(cell_value))
     return match.group(1) if match else None
 
 
-def _normalize_code(value: object) -> str | pd.NA:
-    if value is None or pd.isna(value):
+def _normalize_code(value: object) -> object:
+    if value is None or value is pd.NA:
+        return pd.NA
+    if isinstance(value, float) and math.isnan(value):
         return pd.NA
     text = str(value).strip()
     if not text:
@@ -213,9 +224,8 @@ def _normalize_p3dh_api_csv_legacy_format(
         if col in normalized.columns:
             normalized[col] = normalized[col].astype("string")
 
-    normalized["template"] = normalized.get(
-        "cell", pd.Series(index=normalized.index)
-    ).map(_extract_template_from_cell)
+    cell_series = normalized["cell"] if "cell" in normalized.columns else pd.Series(index=normalized.index)
+    normalized["template"] = cell_series.map(_extract_template_from_cell)
     normalized["row"] = normalized["row"].where(
         normalized["row"].notna() & (normalized["row"].astype(str).str.strip() != ""),
         normalized["cell"].map(_extract_row_from_cell),
@@ -265,7 +275,7 @@ def _normalize_p3dh_api_csv_legacy_format(
     normalized["sheet"] = pd.NA
 
     ref_date = extract_reference_date_from_path(path)
-    normalized["reference_date"] = pd.to_datetime(ref_date, errors="coerce")
+    normalized["reference_date"] = pd.Timestamp(ref_date) if ref_date else pd.NaT
     normalized["fact_value"] = pd.to_numeric(normalized["fact_value"], errors="coerce")
 
     normalized = normalized[
@@ -286,8 +296,8 @@ def _normalize_p3dh_api_csv_legacy_format(
         ]
     ].copy()
 
-    normalized = normalized[normalized["fact_value"].notna()].copy()
-    return normalized
+    normalized = normalized.loc[pd.notna(normalized["fact_value"])].copy()
+    return cast(pd.DataFrame, normalized)
 
 
 def _normalize_p3dh_api_csv_lei_format(frame: pd.DataFrame, path: Path) -> pd.DataFrame:
@@ -404,7 +414,7 @@ def _normalize_p3dh_api_csv_lei_format(frame: pd.DataFrame, path: Path) -> pd.Da
     normalized["sheet"] = pd.NA
 
     ref_date = extract_reference_date_from_path(path)
-    normalized["reference_date"] = pd.to_datetime(ref_date, errors="coerce")
+    normalized["reference_date"] = pd.Timestamp(ref_date) if ref_date else pd.NaT
     normalized["fact_value"] = pd.to_numeric(normalized["fact_value"], errors="coerce")
 
     # Select final columns (drop lei and helper columns)
@@ -426,35 +436,19 @@ def _normalize_p3dh_api_csv_lei_format(frame: pd.DataFrame, path: Path) -> pd.Da
         ]
     ].copy()
 
-    normalized = normalized[normalized["fact_value"].notna()].copy()
-    return normalized
+    normalized = normalized.loc[pd.notna(normalized["fact_value"])].copy()
+    return cast(pd.DataFrame, normalized)
 
 
 def _extract_row_name_template(row_name: str) -> str | None:
     """Extract template code from row_name like 'K_30.04 - EU REM4 - ...'."""
-    if row_name is None or pd.isna(row_name):
+    if row_name is None or row_name is pd.NA:
         return None
     match = re.match(r"(K_\d{2}\.\d{2})\s*-", str(row_name).strip())
     return match.group(1) if match else None
 
 
-def scan_p3dh_directory(p3dh_dir: str | Path) -> Iterator[tuple[Path, pd.DataFrame]]:
-    """Scan directory for legacy Excel and API CSV P3DH exports."""
-    dir_path = as_path(p3dh_dir)
-
-    for xlsx_file in sorted(dir_path.rglob("*.xlsx")):
-        try:
-            df = normalize_p3dh_export(xlsx_file)
-            yield xlsx_file.name, df
-        except Exception as e:
-            print(f"Skipping {xlsx_file.name}: {e}")
-
-    for csv_file in sorted(dir_path.rglob("*.csv")):
-        try:
-            df = normalize_p3dh_api_csv(csv_file)
-            yield csv_file.relative_to(dir_path), df
-        except Exception as e:
-            print(f"Skipping {csv_file.name}: {e}")
+def scan_p3dh_directory(p3dh_dir: str | Path) -> Iterator[tuple[str | Path, pd.DataFrame]]:
     """Scan directory for legacy Excel and API CSV P3DH exports."""
     dir_path = as_path(p3dh_dir)
 
@@ -498,7 +492,7 @@ def build_p3dh_key(frame: pd.DataFrame) -> pd.Series:
     missing = [col for col in key_cols if col not in frame.columns]
     if missing:
         raise ValueError(f"Missing key columns for P3DH: {', '.join(missing)}")
-    return frame[key_cols].astype(str).agg("|".join, axis=1)
+    return cast(pd.Series, frame[key_cols].astype(str).agg("|".join, axis=1))
 
 
 def with_key_column(frame: pd.DataFrame) -> pd.DataFrame:
@@ -519,11 +513,11 @@ def split_incremental(
         existing_keys = build_p3dh_key(existing)
         new_keys = build_p3dh_key(new_frame)
         mask_new = ~new_keys.isin(set(existing_keys))
-        to_append = new_frame[mask_new].copy()
-        skipped = new_frame[~mask_new].copy()
+        to_append = cast(pd.DataFrame, new_frame[mask_new].copy())
+        skipped = cast(pd.DataFrame, new_frame[~mask_new].copy())
         return to_append, skipped, existing
 
-    return new_frame.copy(), pd.DataFrame(), pd.DataFrame()
+    return cast(pd.DataFrame, new_frame.copy()), pd.DataFrame(), pd.DataFrame()
 
 
 def append_incremental(
@@ -533,9 +527,9 @@ def append_incremental(
     """Append only new rows vs existing CSV snapshot."""
     to_append, skipped, existing = split_incremental(new_frame, existing_path)
     if not existing.empty:
-        combined = pd.concat([existing, to_append], ignore_index=True)
+        combined = cast(pd.DataFrame, pd.concat([existing, to_append], ignore_index=True))
     else:
-        combined = to_append.copy()
+        combined = cast(pd.DataFrame, to_append.copy())
     return combined, len(to_append.index), len(skipped.index)
 
 
@@ -552,7 +546,7 @@ def export_skipped_keys(
     existing_keys = build_p3dh_key(existing)
     new_keys = build_p3dh_key(new_frame)
     mask_skipped = new_keys.isin(set(existing_keys))
-    skipped = new_frame[mask_skipped].copy()
+    skipped = cast(pd.DataFrame, new_frame[mask_skipped].copy())
     if skipped.empty:
         return 0
     skipped = with_key_column(skipped)

@@ -16,11 +16,14 @@ import socket
 import subprocess
 import sys
 import time
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
+from typing import cast
 
 import pandas as pd
 import requests
+from playwright.sync_api import sync_playwright
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
@@ -90,7 +93,7 @@ def _set_template(frame, template: str) -> None:
     for opt in frame.locator(f'#{popup_id} [role="option"]').all():
         text = opt.text_content().strip()
         title = opt.get_attribute("title") or ""
-        if template == text or template == title or search_token in text:
+        if template in (text, title) or search_token in text:
             opt.click(no_wait_after=True)
             matched = True
             break
@@ -125,15 +128,32 @@ def ensure_chrome_debugging() -> None:
     raise RuntimeError("Chrome debugging did not start")
 
 
-def get_powerbi_frame(page, retries: int = 20):
+def get_powerbi_frame(page, retries: int = 60):
     """Wait for the embedded Power BI iframe and return its frame."""
-    for _ in range(retries):
+    for i in range(retries):
         iframe = page.query_selector("iframe[src*=powerbi]")
         if iframe:
             frame = iframe.content_frame()
             if frame:
                 return frame
-        time.sleep(1)
+            # iframe element exists but content_frame() not ready yet
+            time.sleep(1)
+        else:
+            time.sleep(1)
+        if i == retries - 1:
+            # Last attempt: try direct iframe src navigation as fallback
+            iframe_el = page.query_selector("iframe[src*=powerbi]")
+            if iframe_el:
+                src = iframe_el.get_attribute("src")
+                if src:
+                    log.warning(
+                        "Power BI iframe content_frame() unavailable; trying direct navigation to %s",
+                        src[:80],
+                    )
+                    iframe_page = page.context.new_page()
+                    iframe_page.goto(src, wait_until="domcontentloaded")
+                    time.sleep(10)
+                    return iframe_page
     raise RuntimeError("Power BI iframe not available")
 
 
@@ -142,7 +162,7 @@ def get_available_dates(p) -> list[str]:
     browser = p.chromium.connect_over_cdp(CDP_URL)
     page = browser.contexts[0].new_page()
     page.goto(REPORT_URL, wait_until="domcontentloaded")
-    time.sleep(10)
+    time.sleep(20)
 
     frame = get_powerbi_frame(page)
     frame.locator('[aria-label="ReferenceDate"][role="combobox"]').click(
@@ -174,8 +194,6 @@ def date_to_folder_name(date_str: str) -> str:
 
 def capture_token_and_query(p, date_str: str, template: str) -> dict:
     """Capture the API token and query from the browser."""
-    from playwright.sync_api import sync_playwright
-
     captured = {}
 
     def handle_request(request):
@@ -338,7 +356,7 @@ def _get_templates_from_browser(p, date_str: str) -> list[str]:
     browser = p.chromium.connect_over_cdp(CDP_URL)
     page = browser.contexts[0].new_page()
     page.goto(REPORT_URL, wait_until="domcontentloaded")
-    time.sleep(10)
+    time.sleep(20)
 
     frame = get_powerbi_frame(page)
 
@@ -382,7 +400,7 @@ def get_entities(p, date_str: str) -> list[str]:
     browser = p.chromium.connect_over_cdp(CDP_URL)
     page = browser.contexts[0].new_page()
     page.goto(REPORT_URL, wait_until="domcontentloaded")
-    time.sleep(10)
+    time.sleep(20)
 
     frame = get_powerbi_frame(page)
     _set_reference_date(frame, date_str)
@@ -427,14 +445,22 @@ def modify_query(query_json: dict, template: str, max_rows: int = 100000) -> dic
             if expr.get("Column", {}).get("Property") == "Template":
                 condition["In"]["Values"] = [[{"Literal": {"Value": f"'{template}'"}}]]
 
-    # Increase row limit
-    if "Binding" in cmd:
-        if "DataReduction" in cmd["Binding"]:
-            if "Primary" in cmd["Binding"]["DataReduction"]:
-                if "Window" in cmd["Binding"]["DataReduction"]["Primary"]:
-                    cmd["Binding"]["DataReduction"]["Primary"]["Window"]["Count"] = (
-                        max_rows
-                    )
+    # Increase all Power BI data reduction limits.
+    # The captured visual query has both Primary.Window.Count and Secondary.Top.Count;
+    # raising only Primary still leaves the visual capped/truncated.
+    def raise_data_reduction_counts(obj):
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if key == "Count" and isinstance(value, int):
+                    obj[key] = max_rows
+                else:
+                    raise_data_reduction_counts(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                raise_data_reduction_counts(item)
+
+    if "Binding" in cmd and "DataReduction" in cmd["Binding"]:
+        raise_data_reduction_counts(cmd["Binding"]["DataReduction"])
 
     return query
 
@@ -463,7 +489,7 @@ def execute_query(
                 wait_s,
             )
             time.sleep(wait_s)
-    raise last_exc
+    raise RuntimeError("Query execution failed") from last_exc
 
 
 def _parse_data_shapes_response(dsr_data: dict) -> pd.DataFrame:
@@ -488,7 +514,7 @@ def _parse_data_shapes_response(dsr_data: dict) -> pd.DataFrame:
             ]
             for row in table.get("Rows", []):
                 if isinstance(row, list):
-                    rows.append(dict(zip(columns, row)))
+                    rows.append(dict(zip(columns, row, strict=False)))
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows)
@@ -713,15 +739,21 @@ def parse_partitioned_response(data: dict) -> pd.DataFrame:
                 for child in values:
                     parse_level(child, base_context, 1)
 
-    frame = pd.DataFrame(rows)
-    if frame.empty:
-        return frame
-    frame = frame[frame["Cell"].astype(str).str.strip() != ""].copy()
-    if "ReferenceDate" in frame.columns:
-        frame["ReferenceDate"] = pd.to_datetime(
-            frame["ReferenceDate"], unit="ms", errors="coerce"
-        ).dt.strftime("%Y-%m-%d")
-    return frame
+    parsed_frame = pd.DataFrame(rows)
+    if parsed_frame.empty:
+        return parsed_frame
+    parsed_frame = parsed_frame[
+        parsed_frame["Cell"].astype(str).str.strip() != ""
+    ].copy()
+    if "ReferenceDate" in parsed_frame.columns:
+        converted_dates = pd.to_datetime(
+            parsed_frame["ReferenceDate"], unit="ms", errors="coerce"
+        )
+        parsed_frame["ReferenceDate"] = [
+            value.strftime("%Y-%m-%d") if pd.notna(value) else None
+            for value in converted_dates
+        ]
+    return cast(pd.DataFrame, parsed_frame)
 
 
 def download_partitioned_template(
@@ -790,8 +822,6 @@ def main():
     parser.add_argument("--template", default=None)
     args = parser.parse_args()
 
-    from playwright.sync_api import sync_playwright
-
     ensure_chrome_debugging()
 
     # Step 0: resolve latest date if not provided
@@ -853,6 +883,7 @@ def main():
     LARGE_TIMEOUT = 600  # 10 minutes for slow templates
 
     # Step 3: Download each template via API
+    modified_query = {}
     for i, template in enumerate(templates):
         template_code = template.split(" - ")[0].strip()
         filename = template_to_filename(template)
@@ -860,23 +891,19 @@ def main():
 
         log.info(f"[{i + 1}/{len(templates)}] {template[:60]}")
 
+        modified_query = modify_query(original_query, template, max_rows=100000)
         try:
-            modified_query = modify_query(original_query, template, max_rows=100000)
             timeout = LARGE_TIMEOUT if template_code in SLOW_TEMPLATES else 120
             response_data = execute_query(
                 url, headers, modified_query, retries=3, timeout=timeout
             )
             # Try standard parser first, then partitioned parser as fallback
             df = pd.DataFrame()
-            try:
+            with suppress(Exception):
                 df = parse_response(response_data)
-            except Exception:
-                pass
             if df.empty:
-                try:
+                with suppress(Exception):
                     df = parse_partitioned_response(response_data)
-                except Exception:
-                    pass
             if df.empty:
                 raise ValueError("Both parsers returned empty DataFrame")
 
