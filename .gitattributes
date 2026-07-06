@@ -1,0 +1,9 @@
+# Keep shell scripts Unix-compatible even on Windows checkouts.
+*.sh text eol=lf
+
+# Normalize source/docs as text.
+*.py text
+*.md text
+*.yaml text
+*.yml text
+*.json text
