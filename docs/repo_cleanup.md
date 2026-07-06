@@ -1,6 +1,6 @@
-# Repository cleanup plan
+# Repository cleanup
 
-The repository is being narrowed from a bank business-planning/stress-testing toolkit to a P3DH-first data extraction toolkit.
+The repository has been narrowed from a bank business-planning/stress-testing toolkit to a P3DH-first data extraction toolkit.
 
 ## Active focus
 
@@ -10,15 +10,9 @@ The repository is being narrowed from a bank business-planning/stress-testing to
 - P3DH completeness/quality validation
 - TrEx ingestion as secondary support
 
-## Archived legacy scope
+## Removed legacy scope
 
-Legacy business-planning modules, rate/yield-curve utilities, rating/VBM calculations, and old planning docs have been moved to:
-
-```text
-archive/business_planning/
-```
-
-This keeps the code available for reference without presenting it as active product code.
+Legacy business-planning modules, rate/yield-curve utilities, rating/VBM calculations, SQLAlchemy projection models, and old planning docs have been removed from the active tree. Generated data/log artifacts remain local and are ignored by git.
 
 ## Next refactor
 

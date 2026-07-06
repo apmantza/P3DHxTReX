@@ -1,8 +1,8 @@
-# AGENTS.md — BBIRR Coding Agent Guide
+# AGENTS.md — BBIRR / P3DHxTReX Coding Agent Guide
 
 ## Project
 
-BBIRR is a bank business planning and stress-testing toolkit for EU commercial banks. It combines P3DH public disclosure data, TrEx transparency exercise data, ECB rates/yield curves, and planning assumptions.
+This repository is focused on EBA Pillar 3 Data Hub (P3DH) extraction, validation, dictionary generation, normalization, and SQLite loading. EBA Transparency Exercise (TrEx) support is secondary.
 
 ## Environment
 
@@ -18,7 +18,7 @@ BBIRR is a bank business planning and stress-testing toolkit for EU commercial b
 ## Data policy
 
 - Large local data artifacts are not tracked in git.
-- `data/`, SQLite DBs, CSV/XLSX exports, logs, and screenshots are ignored.
+- `data/`, SQLite DBs, CSV/XLSX exports, logs, screenshots, browser profiles, and agent caches are ignored.
 - Code, docs, config, and small operational scripts are tracked.
 
 ## P3DH notes
@@ -30,6 +30,7 @@ BBIRR is a bank business planning and stress-testing toolkit for EU commercial b
 - The EDAP report is a Power BI embedded report.
 - Preferred download path is direct Power BI `QueryExecution` API replay, not UI export.
 - Chrome remote debugging is used only to discover slicer values and capture the API token/query.
+- Treat any DSR restart token (`RT`) as a truncation/completeness warning.
 
 ## P3DH stable workflow
 
@@ -39,17 +40,31 @@ Launch Chrome if needed:
 PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/launch_chrome_debug.py
 ```
 
-Download a full P3DH date package in parallel:
+Robust date download:
 
 ```bash
-PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/download_p3dh_parallel.py --date "31/12/2025" --workers 5
+PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/download_p3dh_robust.py \
+  --date "31/12/2025" \
+  --workers 8 \
+  --refresh-minutes 8 \
+  --request-delay-ms 100 \
+  --max-requests-per-minute 0 \
+  --partition-chunk-size 50 \
+  --partition-timeout 30 \
+  --partition-retries 1 \
+  --resume
 ```
 
-Sequential fallback / single-template download:
+Build dictionary:
 
 ```bash
-PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/download_via_api.py --date "31/12/2025"
-PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/download_via_api.py --date "31/12/2025" --template K_73.00
+PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/build_p3dh_data_dictionary.py
+```
+
+Build normalized SQLite:
+
+```bash
+PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/build_p3dh_sqlite.py --date "31/12/2025" --replace
 ```
 
 Verify portal template coverage:
@@ -58,28 +73,11 @@ Verify portal template coverage:
 PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/verify_p3dh_completeness.py
 ```
 
-Clean rebuild of P3DH SQLite from a single fresh raw package:
-
-```bash
-rm -f data/processed/p3dh.sqlite data/processed/p3dh_normalized.csv
-PYTHONIOENCODING=utf-8 .venv/Scripts/python - <<'PY'
-from pathlib import Path
-from modules.ingestion.p3dh_normalize import normalize_all_p3dh, upsert_p3dh_sqlite
-
-processed = Path('data/processed')
-raw_date = Path('data/raw/P3DH/20251231')
-normalized = normalize_all_p3dh(raw_date)
-normalized.to_csv(processed / 'p3dh_normalized.csv', index=False, encoding='utf-8-sig')
-inserted, skipped = upsert_p3dh_sqlite(normalized, processed / 'p3dh.sqlite')
-print(f'normalized={len(normalized):,} inserted={inserted:,} skipped={skipped:,}')
-PY
-```
-
 ## Known P3DH limitation
 
-- `K_83.01` currently fails via direct API replay due to an EBA/Power BI semantic model error involving `dm_Module[ENT_NAM]`.
+- `K_83.01` currently fails via direct API replay due to an EBA/Power BI semantic model issue.
 - Treat it as an EBA-side issue unless the portal/API model changes.
-- UI export may be used as a manual fallback if that template is required.
+- Omit it from automated completeness expectations for now.
 
 ## Coding conventions
 

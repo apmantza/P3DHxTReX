@@ -1,32 +1,37 @@
-# BBIRR — Bank Business Plan & Stress Testing Tool
+# BBIRR / P3DHxTReX
 
-## Project Overview
-White-label web application for EU commercial banks — strategic steering + stress testing platform. See `docs/plans/2026-02-21-bank-business-plan-stress-tool-design.md` for full design.
+This repository is focused on extracting, validating, and normalizing public EBA disclosure data.
+
+## Scope
+
+- Primary: EBA Pillar 3 Data Hub (P3DH)
+- Secondary: EBA Transparency Exercise (TrEx)
 
 ## Environment
 
-- **Python:** Use the project virtual environment at `.venv/`
-- **Run Python:** `.venv/Scripts/python` (Windows)
-- **Install packages:** `.venv/Scripts/pip install <package>` — NEVER install globally
-- **OS:** Windows 11, shell is bash (Git Bash)
+- Use the project virtual environment only.
+- Run Python with `.venv/Scripts/python`.
+- Install packages with `.venv/Scripts/pip install <package>`.
+- Use UTF-8 explicitly: `PYTHONIOENCODING=utf-8` for shell-launched Python.
 
-## Conventions
+## Key commands
 
-- All Python code targets Python 3.11+
-- Use `.venv/Scripts/python` for all Python commands
-- Keep dependencies in `.venv` only — no global installs
-- **Encoding:** Always use UTF-8. Windows defaults to cp1252 which breaks on EU characters (€, ≥, accented names, etc.)
-  - Python scripts: `open(..., encoding="utf-8")` on every file open
-  - Bash: prefix Python commands with `PYTHONIOENCODING=utf-8`
-  - CSV/Excel output: explicit `encoding="utf-8-sig"` for Excel-compatible CSV
+Launch Chrome with remote debugging:
 
-## P3DH Data Timing
+```bash
+PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/launch_chrome_debug.py
+```
 
-- P3DH publishes **full data only twice per year**: 31/12 and 30/06
-- Q1 (31/03) and Q3 (30/09) releases contain only a subset of templates (lighter files)
-- **Expected availability:**
-  - 31/12 data: Complete by end of March each year
-  - 30/06 data: Complete by end of November each year
-- Current 31/12 data is incomplete — files will be re-downloaded in March and re-ingested
-- Incremental ingestion handles re-downloads: same keys are skipped, new keys added
-- **Run ingestion:** `scripts\run_ingestion_and_db.bat`
+Download P3DH robustly:
+
+```bash
+PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/download_p3dh_robust.py --date "31/12/2025" --resume
+```
+
+Build normalized SQLite:
+
+```bash
+PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/build_p3dh_sqlite.py --date "31/12/2025" --replace
+```
+
+Generated data/logs stay local under `data/` and are ignored by git.

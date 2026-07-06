@@ -1,23 +1,46 @@
+# Python / tooling
 .venv/
-.pi-lens/
+__pycache__/
+*.py[cod]
+*$py.class
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# Agent / local automation state
 .pi/
+.pi-lens/
+.claude/
 .chrome-cdp-skill/
 .chrome-debug-profile/
-.claude/
-__pycache__/
-*.pyc
-*.pyo
-*.log
-NUL
 
-# Local data artifacts
+# Local data and generated artifacts
 data/
+logs/
+exports/
+screenshots/
+*.log
 *.sqlite
+*.sqlite3
 *.db
+*.db-journal
 *.csv
 *.xlsx
-*.json
+*.xlsm
+*.parquet
+*.feather
 *.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+
+# Windows/local oddities
+NUL
+Thumbs.db
+Desktop.ini
+
+# Legacy local generated files
 ingest_run.log
 config/current_rates.json
 config/data_points_download_flow.json

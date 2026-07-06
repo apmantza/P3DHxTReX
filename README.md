@@ -7,7 +7,7 @@ BBIRR is now focused on extracting, validating, and normalizing public EBA discl
 - **Primary:** EBA Pillar 3 Data Hub (P3DH)
 - **Secondary:** EBA Transparency Exercise (TrEx)
 
-Legacy business-planning/stress-testing code is archived under `archive/business_planning/`.
+Legacy business-planning/stress-testing code has been removed from the active repository history going forward.
 
 ## Core commands
 
@@ -21,13 +21,18 @@ Build the local P3DH dictionary:
 
 ```bash
 PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/build_p3dh_data_dictionary.py
-PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/load_p3dh_dict_db.py
 ```
 
 Download P3DH data:
 
 ```bash
-PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/download_via_api.py --date "31/12/2025"
+PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/download_p3dh_robust.py --date "31/12/2025" --resume
+```
+
+Build normalized SQLite:
+
+```bash
+PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/build_p3dh_sqlite.py --date "31/12/2025" --replace
 ```
 
 Verify coverage:
