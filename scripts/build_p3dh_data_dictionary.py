@@ -12,7 +12,9 @@ Output: data/processed/p3dh_data_dictionary.csv
 """
 
 import re
-import os
+from pathlib import Path
+from typing import Any, cast
+
 import pandas as pd
 
 # Map filename fragment → module_name (matches P3DH module_name field)
@@ -26,8 +28,8 @@ MODULE_MAP = {
     "GSIIDISPILLAR3": "GSII disclosures",
 }
 
-TABLE_LAYOUT_DIR = os.path.join("data", "raw", "EBA_DPM", "table_layout")
-OUTPUT_PATH = os.path.join("data", "processed", "p3dh_data_dictionary.csv")
+TABLE_LAYOUT_DIR = Path("data") / "raw" / "EBA_DPM" / "table_layout"
+OUTPUT_PATH = Path("data") / "processed" / "p3dh_data_dictionary.csv"
 
 
 def infer_unit(cell_str: str) -> str:
@@ -49,9 +51,18 @@ def extract_dpm_id(cell_str: str) -> str | None:
     return m.group(1) if m else None
 
 
-def normalize_row_code(raw) -> str | None:
+def is_missing(value: Any) -> bool:
+    """Return True for scalar pandas missing values.
+
+    The parser only passes scalar worksheet cells here; wrapping pd.isna keeps
+    pandas' broad static return type (bool | ndarray | Series) out of call sites.
+    """
+    return bool(pd.isna(value))
+
+
+def normalize_row_code(raw: Any) -> str | None:
     """Convert float row code (10.0) to 4-digit string (0010)."""
-    if pd.isna(raw):
+    if is_missing(raw):
         return None
     try:
         return f"{int(float(raw)):04d}"
@@ -71,7 +82,8 @@ def _find_col_codes_row(df: pd.DataFrame) -> int | None:
         codes = [
             str(row.iloc[ci]).strip()
             for ci in range(3, len(row))
-            if not pd.isna(row.iloc[ci]) and re.match(r"^\d{4}$", str(row.iloc[ci]).strip())
+            if not is_missing(row.iloc[ci])
+            and re.match(r"^\d{4}$", str(row.iloc[ci]).strip())
         ]
         if len(codes) >= 1:
             return ri
@@ -86,9 +98,9 @@ def _find_data_start_row(df: pd.DataFrame, codes_row: int) -> int:
             return ri + 1
         # Also accept if col 2 has a numeric row code
         rc = df.iloc[ri, 2] if df.shape[1] > 2 else None
-        if not pd.isna(rc):
+        if rc is not None and not is_missing(rc):
             try:
-                int(float(rc))
+                int(float(str(rc)))
                 return ri
             except (ValueError, TypeError):
                 pass
@@ -109,14 +121,16 @@ def _find_main_property_col(df: pd.DataFrame, codes_row: int) -> int:
         return 8
     row = df.iloc[data_row_idx]
     for ci in range(3, df.shape[1]):
-        v = str(row.iloc[ci]) if not pd.isna(row.iloc[ci]) else ""
+        v = str(row.iloc[ci]) if not is_missing(row.iloc[ci]) else ""
         if re.match(r"^\(", v):
             return ci
     return 8  # default
 
 
-def parse_sheet(xl: pd.ExcelFile, sheet: str, template_code: str, module_name: str) -> list[dict]:
-    df = xl.parse(sheet, header=None)
+def parse_sheet(
+    xl: pd.ExcelFile, sheet: str, template_code: str, module_name: str
+) -> list[dict[str, Any]]:
+    df = cast(pd.DataFrame, xl.parse(sheet, header=None))
     if df.shape[0] < 6 or df.shape[1] < 4:
         return []
 
@@ -124,7 +138,7 @@ def parse_sheet(xl: pd.ExcelFile, sheet: str, template_code: str, module_name: s
     template_name = sheet
     for ri in range(min(3, df.shape[0])):
         v = df.iloc[ri, 0]
-        if not pd.isna(v) and str(v).strip():
+        if not is_missing(v) and str(v).strip():
             template_name = str(v).strip()
             break
 
@@ -138,13 +152,19 @@ def parse_sheet(xl: pd.ExcelFile, sheet: str, template_code: str, module_name: s
     col_names_raw = df.iloc[codes_row - 1].tolist()
 
     col_positions: dict[int, tuple[str, str]] = {}  # col_index → (col_code, col_name)
-    for ci, (cname, ccode) in enumerate(zip(col_names_raw, col_codes_raw)):
-        ccode_str = str(ccode).strip() if not pd.isna(ccode) else ""
+    for ci, (cname, ccode) in enumerate(
+        zip(col_names_raw, col_codes_raw, strict=False)
+    ):
+        ccode_str = str(ccode).strip() if not is_missing(ccode) else ""
         if not re.match(r"^\d{4}$", ccode_str):
             continue
         ccode_norm = ccode_str  # already 4 digits
         # Column name: use explicit name from names row, fall back to code
-        cname_str = str(cname).strip() if not pd.isna(cname) and str(cname).strip() else ccode_str
+        cname_str = (
+            str(cname).strip()
+            if not is_missing(cname) and str(cname).strip()
+            else ccode_str
+        )
         # Skip if name looks like a DPM property
         if re.match(r"^\(", cname_str):
             cname_str = ccode_str
@@ -162,7 +182,7 @@ def parse_sheet(xl: pd.ExcelFile, sheet: str, template_code: str, module_name: s
 
     for ri in range(data_start, df.shape[0]):
         row = df.iloc[ri]
-        row_name_raw = str(row.iloc[1]).strip() if not pd.isna(row.iloc[1]) else ""
+        row_name_raw = str(row.iloc[1]).strip() if not is_missing(row.iloc[1]) else ""
         row_code_raw = row.iloc[2] if df.shape[1] > 2 else None
         row_code = normalize_row_code(row_code_raw)
 
@@ -170,26 +190,32 @@ def parse_sheet(xl: pd.ExcelFile, sheet: str, template_code: str, module_name: s
             continue
 
         # Section header: has row_name but no row_code and no data in data cols
+        has_data = any(
+            not is_missing(row.iloc[ci]) for ci in data_col_indices if ci < len(row)
+        )
         if row_code is None:
-            # Check if any data col has content
-            has_data = any(
-                not pd.isna(row.iloc[ci]) for ci in data_col_indices if ci < len(row)
-            )
-            if not has_data:
-                # Strip leading code prefix like "0005 Available own funds"
-                section_text = re.sub(r"^\d{4}\s+", "", row_name_raw)
-                current_section = section_text.replace("\n", " ").strip()
-            continue
+            if has_data and row_name_raw.lower() == "open rows":
+                # Some P3 templates are open-row tables: the row key is a typed
+                # dimension rather than a fixed numeric row code. Keep the data
+                # cells with a stable synthetic row code so the dictionary still
+                # covers the template's fields.
+                row_code = f"OPEN_{ri:04d}"
+            else:
+                if not has_data:
+                    # Strip leading code prefix like "0005 Available own funds"
+                    section_text = re.sub(r"^\d{4}\s+", "", row_name_raw)
+                    current_section = section_text.replace("\n", " ").strip()
+                continue
 
         # DPM properties: prop_col_start = main property, columns after = dimensions
         main_property = ""
-        if df.shape[1] > prop_col_start and not pd.isna(row.iloc[prop_col_start]):
+        if df.shape[1] > prop_col_start and not is_missing(row.iloc[prop_col_start]):
             main_property = str(row.iloc[prop_col_start]).strip()
 
         dim_parts = []
         for ci in range(prop_col_start + 1, df.shape[1]):
             v = row.iloc[ci]
-            if not pd.isna(v) and str(v).strip() and str(v).strip() != "nan":
+            if not is_missing(v) and str(v).strip() and str(v).strip() != "nan":
                 dim_parts.append(str(v).strip())
         dimensions = " | ".join(dim_parts)
 
@@ -199,9 +225,23 @@ def parse_sheet(xl: pd.ExcelFile, sheet: str, template_code: str, module_name: s
                 continue
             col_code, col_name = col_positions[ci]
             cell_val = row.iloc[ci]
-            cell_str = str(cell_val) if not pd.isna(cell_val) else ""
+            cell_str = str(cell_val) if not is_missing(cell_val) else ""
             unit = infer_unit(cell_str)
             dpm_id = extract_dpm_id(cell_str)
+
+            cell_main_property = main_property
+            if str(row_name_raw).lower() == "open rows" and ri + 1 < df.shape[0]:
+                next_label = (
+                    str(df.iloc[ri + 1, 1]).strip()
+                    if not is_missing(df.iloc[ri + 1, 1])
+                    else ""
+                )
+                if (
+                    next_label == "Main Property"
+                    and ci < df.shape[1]
+                    and not is_missing(df.iloc[ri + 1, ci])
+                ):
+                    cell_main_property = str(df.iloc[ri + 1, ci]).strip()
 
             records.append(
                 {
@@ -210,12 +250,14 @@ def parse_sheet(xl: pd.ExcelFile, sheet: str, template_code: str, module_name: s
                     "module_name": module_name,
                     "section": current_section,
                     "row_code": row_code,
-                    "row_name": row_name_raw.replace("\xa0", " ").replace("\n", " ").strip(),
+                    "row_name": row_name_raw.replace("\xa0", " ")
+                    .replace("\n", " ")
+                    .strip(),
                     "col_code": col_code,
                     "col_name": col_name,
                     "unit": unit,
                     "dpm_point_id": dpm_id,
-                    "main_property": main_property,
+                    "main_property": cell_main_property,
                     "dimensions": dimensions,
                 }
             )
@@ -224,11 +266,13 @@ def parse_sheet(xl: pd.ExcelFile, sheet: str, template_code: str, module_name: s
 
 
 def main():
-    all_records: list[dict] = []
+    all_records: list[dict[str, Any]] = []
 
-    for fname in sorted(os.listdir(TABLE_LAYOUT_DIR)):
-        if not fname.endswith(".xlsx"):
-            continue
+    if not TABLE_LAYOUT_DIR.exists():
+        raise FileNotFoundError(f"Table layout directory not found: {TABLE_LAYOUT_DIR}")
+
+    for fpath in sorted(TABLE_LAYOUT_DIR.glob("*.xlsx")):
+        fname = fpath.name
 
         # Find matching module
         module_name = None
@@ -239,7 +283,6 @@ def main():
         if module_name is None:
             continue  # skip non-P3 files (MiCA, SEPA, etc.)
 
-        fpath = os.path.join(TABLE_LAYOUT_DIR, fname)
         print(f"Processing: {fname} → {module_name}")
         xl = pd.ExcelFile(fpath, engine="openpyxl")
 
@@ -247,7 +290,9 @@ def main():
             if sheet == "TOC":
                 continue
             # template_code = sheet name, strip .a/.b and any trailing (XXXX) variant
-            template_code = re.sub(r"\.[a-z](\(\d{4}\))?$", "", sheet)  # K_74.00.a(0010) → K_74.00
+            template_code = re.sub(
+                r"\.[a-z](\(\d{4}\))?$", "", sheet
+            )  # K_74.00.a(0010) → K_74.00
             records = parse_sheet(xl, sheet, template_code, module_name)
             all_records.extend(records)
             print(f"  {sheet}: {len(records)} cells")
@@ -258,13 +303,19 @@ def main():
     df_out = df_out.drop_duplicates(
         subset=["template_code", "row_code", "col_code", "module_name"]
     )
-    df_out = df_out.sort_values(["module_name", "template_code", "row_code", "col_code"])
+    df_out = df_out.sort_values(
+        ["module_name", "template_code", "row_code", "col_code"]
+    )
     df_out.reset_index(drop=True, inplace=True)
 
-    os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     df_out.to_csv(OUTPUT_PATH, index=False, encoding="utf-8-sig")
     print(f"\nSaved {len(df_out):,} records → {OUTPUT_PATH}")
-    print(df_out[["template_code", "row_code", "col_code", "unit", "main_property"]].head(10).to_string())
+    print(
+        df_out[["template_code", "row_code", "col_code", "unit", "main_property"]]
+        .head(10)
+        .to_string()
+    )
 
 
 if __name__ == "__main__":

@@ -224,7 +224,11 @@ def _normalize_p3dh_api_csv_legacy_format(
         if col in normalized.columns:
             normalized[col] = normalized[col].astype("string")
 
-    cell_series = normalized["cell"] if "cell" in normalized.columns else pd.Series(index=normalized.index)
+    cell_series = (
+        normalized["cell"]
+        if "cell" in normalized.columns
+        else pd.Series(index=normalized.index)
+    )
     normalized["template"] = cell_series.map(_extract_template_from_cell)
     normalized["row"] = normalized["row"].where(
         normalized["row"].notna() & (normalized["row"].astype(str).str.strip() != ""),
@@ -448,7 +452,9 @@ def _extract_row_name_template(row_name: str) -> str | None:
     return match.group(1) if match else None
 
 
-def scan_p3dh_directory(p3dh_dir: str | Path) -> Iterator[tuple[str | Path, pd.DataFrame]]:
+def scan_p3dh_directory(
+    p3dh_dir: str | Path,
+) -> Iterator[tuple[str | Path, pd.DataFrame]]:
     """Scan directory for legacy Excel and API CSV P3DH exports."""
     dir_path = as_path(p3dh_dir)
 
@@ -527,7 +533,9 @@ def append_incremental(
     """Append only new rows vs existing CSV snapshot."""
     to_append, skipped, existing = split_incremental(new_frame, existing_path)
     if not existing.empty:
-        combined = cast(pd.DataFrame, pd.concat([existing, to_append], ignore_index=True))
+        combined = cast(
+            pd.DataFrame, pd.concat([existing, to_append], ignore_index=True)
+        )
     else:
         combined = cast(pd.DataFrame, to_append.copy())
     return combined, len(to_append.index), len(skipped.index)

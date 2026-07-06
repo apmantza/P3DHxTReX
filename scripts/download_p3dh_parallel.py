@@ -49,7 +49,7 @@ def load_api_token(date_str: str) -> tuple[str, dict, dict]:
     return captured["url"], dict(captured["headers"]), json.loads(captured["post_data"])
 
 
-def modify_query(base_query: dict, template: str, max_rows: int = 100000) -> dict:
+def modify_query(base_query: dict, template: str, max_rows: int = 5000) -> dict:
     """Modify query to target a specific template."""
     query = json.loads(json.dumps(base_query))
     cmd = query["queries"][0]["Query"]["Commands"][0]["SemanticQueryDataShapeCommand"]
@@ -181,6 +181,15 @@ def download_single_template(
     try:
         modified = modify_query(base_query, template)
         data = execute_query(url, headers, modified, timeout=300)
+        for ds in (
+            data.get("results", [])[0]
+            .get("result", {})
+            .get("data", {})
+            .get("dsr", {})
+            .get("DS", [])
+        ):
+            for msg in ds.get("Msg", []):
+                log.warning("  %s Power BI message: %s", code, msg.get("Message", msg))
         df = parse_response(data)
 
         if df.empty:

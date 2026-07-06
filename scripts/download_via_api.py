@@ -31,6 +31,7 @@ log = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).parent.parent
 OUTPUT_DIR = PROJECT_ROOT / "data" / "raw" / "P3DH"
 CDP_URL = "http://localhost:9222"
+EDAP_URL = "https://edap-public.eba.europa.eu/"
 REPORT_URL = "https://edap-public.eba.europa.eu/Report/index/MTE2"
 
 
@@ -128,6 +129,17 @@ def ensure_chrome_debugging() -> None:
     raise RuntimeError("Chrome debugging did not start")
 
 
+def open_report_from_portal(page) -> None:
+    """Open EDAP home first, then navigate to the P3DH Data Points report.
+
+    The portal can return 403 when the report URL is loaded in a fresh tab without
+    first establishing the EDAP session from the landing page.
+    """
+    page.goto(EDAP_URL, wait_until="domcontentloaded")
+    time.sleep(5)
+    page.goto(REPORT_URL, wait_until="domcontentloaded")
+
+
 def get_powerbi_frame(page, retries: int = 60):
     """Wait for the embedded Power BI iframe and return its frame."""
     for i in range(retries):
@@ -161,7 +173,7 @@ def get_available_dates(p) -> list[str]:
     """Read all available reference dates from the slicer."""
     browser = p.chromium.connect_over_cdp(CDP_URL)
     page = browser.contexts[0].new_page()
-    page.goto(REPORT_URL, wait_until="domcontentloaded")
+    open_report_from_portal(page)
     time.sleep(20)
 
     frame = get_powerbi_frame(page)
@@ -205,7 +217,7 @@ def capture_token_and_query(p, date_str: str, template: str) -> dict:
     browser = p.chromium.connect_over_cdp(CDP_URL)
     page = browser.contexts[0].new_page()
     page.on("request", handle_request)
-    page.goto(REPORT_URL, wait_until="domcontentloaded")
+    open_report_from_portal(page)
     time.sleep(10)
 
     frame = get_powerbi_frame(page)
@@ -355,7 +367,7 @@ def _get_templates_from_browser(p, date_str: str) -> list[str]:
 
     browser = p.chromium.connect_over_cdp(CDP_URL)
     page = browser.contexts[0].new_page()
-    page.goto(REPORT_URL, wait_until="domcontentloaded")
+    open_report_from_portal(page)
     time.sleep(20)
 
     frame = get_powerbi_frame(page)
@@ -399,7 +411,7 @@ def get_entities(p, date_str: str) -> list[str]:
     """Get list of available entity names for a reference date."""
     browser = p.chromium.connect_over_cdp(CDP_URL)
     page = browser.contexts[0].new_page()
-    page.goto(REPORT_URL, wait_until="domcontentloaded")
+    open_report_from_portal(page)
     time.sleep(20)
 
     frame = get_powerbi_frame(page)
@@ -411,7 +423,9 @@ def get_entities(p, date_str: str) -> list[str]:
 
     popup_id = dd.get_attribute("aria-controls")
     all_entities = set()
-    for scroll_y in range(0, 5000, 150):
+    last_count = 0
+    stable_scrolls = 0
+    for scroll_y in range(0, 50000, 200):
         frame.evaluate(
             f"""
             (() => {{
@@ -420,11 +434,18 @@ def get_entities(p, date_str: str) -> list[str]:
             }})()
             """
         )
-        time.sleep(0.25)
+        time.sleep(0.15)
         for opt in frame.locator(f'#{popup_id} [role="option"]').all():
             text = opt.text_content().strip()
             if text and text != "Select all":
                 all_entities.add(text)
+        if len(all_entities) == last_count:
+            stable_scrolls += 1
+        else:
+            stable_scrolls = 0
+            last_count = len(all_entities)
+        if scroll_y > 5000 and stable_scrolls > 50:
+            break
 
     frame.locator("body").click(position={"x": 10, "y": 10}, no_wait_after=True)
     page.close()
@@ -432,7 +453,7 @@ def get_entities(p, date_str: str) -> list[str]:
     return sorted(all_entities)
 
 
-def modify_query(query_json: dict, template: str, max_rows: int = 100000) -> dict:
+def modify_query(query_json: dict, template: str, max_rows: int = 5000) -> dict:
     """Modify the query to target a specific template with higher row limit."""
     query = json.loads(json.dumps(query_json))  # Deep copy
 
@@ -762,8 +783,13 @@ def download_partitioned_template(
     base_query: dict,
     entities: list[str],
 ) -> pd.DataFrame:
-    """Download a slow template by partitioning the query over entities."""
+    """Download a slow template by partitioning the query over entities.
+
+    Entity-level failures are logged and skipped so one transient/bad partition
+    does not lose the whole template.
+    """
     frames: list[pd.DataFrame] = []
+    failed_entities: list[tuple[str, str]] = []
     for i, entity in enumerate(entities):
         query = json.loads(json.dumps(base_query))
         cmd = query["queries"][0]["Query"]["Commands"][0][
@@ -776,7 +802,7 @@ def download_partitioned_template(
                         "Expressions": [
                             {
                                 "Column": {
-                                    "Expression": {"SourceRef": {"Source": "d2"}},
+                                    "Expression": {"SourceRef": {"Source": "d1"}},
                                     "Property": "ENT_NAM",
                                 }
                             }
@@ -786,13 +812,33 @@ def download_partitioned_template(
                 }
             }
         )
-        response_data = execute_query(url, headers, query, retries=1)
+        try:
+            response_data = execute_query(url, headers, query, retries=2)
+        except Exception as exc:
+            failed_entities.append((entity, str(exc)))
+            log.warning(
+                "  [%d/%d] Entity %s failed: %s",
+                i + 1,
+                len(entities),
+                entity,
+                exc,
+            )
+            continue
+
         try:
             frame = parse_response(response_data)
         except (KeyError, IndexError, TypeError):
             try:
                 frame = parse_partitioned_response(response_data)
-            except Exception:
+            except Exception as exc:
+                failed_entities.append((entity, f"parse failed: {exc}"))
+                log.warning(
+                    "  [%d/%d] Entity %s parse failed: %s",
+                    i + 1,
+                    len(entities),
+                    entity,
+                    exc,
+                )
                 frame = pd.DataFrame()
         if not frame.empty:
             frames.append(frame)
@@ -803,6 +849,14 @@ def download_partitioned_template(
                 entity,
                 len(frame),
             )
+    if failed_entities:
+        log.warning(
+            "  Partition completed with %d failed entities", len(failed_entities)
+        )
+        for entity, reason in failed_entities[:20]:
+            log.warning("    failed entity: %s | %s", entity, reason)
+        if len(failed_entities) > 20:
+            log.warning("    ... and %d more", len(failed_entities) - 20)
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
@@ -891,7 +945,7 @@ def main():
 
         log.info(f"[{i + 1}/{len(templates)}] {template[:60]}")
 
-        modified_query = modify_query(original_query, template, max_rows=100000)
+        modified_query = modify_query(original_query, template, max_rows=5000)
         try:
             timeout = LARGE_TIMEOUT if template_code in SLOW_TEMPLATES else 120
             response_data = execute_query(
@@ -904,8 +958,20 @@ def main():
             if df.empty:
                 with suppress(Exception):
                     df = parse_partitioned_response(response_data)
+            has_restart_token = any(
+                ds.get("RT")
+                for ds in response_data.get("results", [])[0]
+                .get("result", {})
+                .get("data", {})
+                .get("dsr", {})
+                .get("DS", [])
+            )
             if df.empty:
                 raise ValueError("Both parsers returned empty DataFrame")
+            if has_restart_token or len(df) >= 490:
+                raise ValueError(
+                    f"Power BI response appears truncated: rows={len(df)}, RT={has_restart_token}"
+                )
 
             df.to_csv(output_path, index=False, encoding="utf-8-sig")
             log.info(f"  Saved: {len(df)} rows -> {filename}")
