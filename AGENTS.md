@@ -1,87 +1,50 @@
-# AGENTS.md — BBIRR / P3DHxTReX Coding Agent Guide
+# AGENTS.md - Guide for coding agents
 
 ## Project
 
-This repository is focused on EBA Pillar 3 Data Hub (P3DH) extraction, validation, dictionary generation, normalization, and SQLite loading. EBA Transparency Exercise (TrEx) support is secondary.
+This repository downloads, stores, and verifies disclosures from the EBA Pillar 3 Data Hub (P3DH). Transparency Exercise (TrEx) data is out of scope.
 
 ## Environment
 
-- Python: use the project virtual environment only.
-- Run Python with `.venv/Scripts/python`.
-- Install packages with `.venv/Scripts/pip install <package>`.
-- Do not install globally.
-- Shell: Git Bash on Windows.
-- Use UTF-8 explicitly.
-  - Python file IO: `encoding="utf-8"` or `encoding="utf-8-sig"` for Excel-compatible CSV.
-  - Bash/Python commands: prefer `PYTHONIOENCODING=utf-8`.
+- Use the project virtual environment: `.venv/Scripts/python`.
+- Install packages with `.venv/Scripts/pip install <package>`. Do not install globally.
+- The shell is Git Bash on Windows.
+- Use UTF-8. Set `PYTHONIOENCODING=utf-8` and pass `encoding="utf-8"` to file functions.
+- Native Windows programs do not understand `/tmp` paths from Git Bash. Use Windows paths for scratch files.
 
 ## Data policy
 
-- Large local data artifacts are not tracked in git.
-- `data/`, SQLite DBs, CSV/XLSX exports, logs, screenshots, browser profiles, and agent caches are ignored.
-- Code, docs, config, and small operational scripts are tracked.
+- Git does not track `data/`, SQLite files, CSV files, logs, screenshots, or browser profiles.
+- Git tracks code, documentation, and small configuration files.
+- Never delete `data/raw/P3DH_json`. It is the source for rebuilding the CSV files without the network.
 
-## P3DH notes
+## Workflow
 
-- P3DH full packages are expected twice per year:
-  - `31/12`: complete around end-March.
-  - `30/06`: complete around end-November.
-- `31/03` and `30/09` are lighter quarterly subsets.
-- The EDAP report is a Power BI embedded report.
-- Preferred download path is direct Power BI `QueryExecution` API replay, not UI export.
-- Chrome remote debugging is used only to discover slicer values and capture the API token/query.
-- Treat any DSR restart token (`RT`) as a truncation/completeness warning.
+1. Download: `scripts/download_p3dh.py --date "DD/MM/YYYY" --all`
+2. Load the database: `scripts/build_p3dh_db.py`
+3. Verify: `scripts/verify_p3dh.py`
+4. After a decoder change, run `scripts/redecode_p3dh.py`, then steps 2 and 3.
 
-## P3DH stable workflow
+Run one downloader process at a time. The default limit is 60 requests per minute.
 
-Launch Chrome if needed:
+## Rules for changes to the download code
 
-```bash
-PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/launch_chrome_debug.py
-```
+- The decoder is `modules/fetch/dsr_decode.py`. It must handle the repeat mask `R` and the null mask for groups and for measures.
+- Never accept a response that carries a restart token (`RT`) as complete. Continue with `RestartTokens`, or split the request.
+- Never use a stored list as a fallback for portal discovery. A failed discovery must raise an error.
+- Identify an entity by its LEI and its name. One LEI can appear under two names.
+- Keep text facts. Many templates contain text, dates, and booleans.
+- Validate each response against the requested reference date and template.
+- A leaf with no value is not a fact. The decoder counts these leaves in `null_measures`.
 
-Robust date download:
+## Known facts
 
-```bash
-PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/download_p3dh_robust.py \
-  --date "31/12/2025" \
-  --workers 8 \
-  --refresh-minutes 8 \
-  --request-delay-ms 100 \
-  --max-requests-per-minute 0 \
-  --partition-chunk-size 50 \
-  --partition-timeout 30 \
-  --partition-retries 1 \
-  --resume
-```
-
-Build dictionary:
-
-```bash
-PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/build_p3dh_data_dictionary.py
-```
-
-Build normalized SQLite:
-
-```bash
-PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/build_p3dh_sqlite.py --date "31/12/2025" --replace
-```
-
-Verify portal template coverage:
-
-```bash
-PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/verify_p3dh_completeness.py
-```
-
-## Known P3DH limitation
-
-- `K_83.01` currently fails via direct API replay due to an EBA/Power BI semantic model issue.
-- Treat it as an EBA-side issue unless the portal/API model changes.
-- Omit it from automated completeness expectations for now.
+- Power BI honours a primary window of up to 30000 leaf rows if `Secondary.Top.Count` is 1. If the product of the counts exceeds 25 million, Power BI ignores the counts and returns 500 rows.
+- The query for `K_83.01` times out at 120 seconds on the dates that list it. See `docs/p3dh_extraction.md`.
+- Entity discovery by scrolling the slicer can miss entities. The downloader pages the whole template and does not depend on the entity list.
 
 ## Coding conventions
 
-- Prefer small, focused modules and scripts.
-- Keep assumptions/mappings in `config/` where practical.
-- Do not commit generated data/log artifacts.
-- Run relevant scripts with `.venv/Scripts/python` before committing.
+- Keep modules small. Keep the command-line scripts thin.
+- Write comments only for facts that the code cannot show.
+- Do not commit data or logs.

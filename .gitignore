@@ -22,8 +22,14 @@ screenshots/
 *.log
 *.sqlite
 *.sqlite3
+*.sqlite-wal
+*.sqlite-shm
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
+*.tmp
+*.gz
 *.csv
 *.xlsx
 *.xlsm
@@ -35,12 +41,15 @@ screenshots/
 *.gif
 *.webp
 
+# Secrets and local environment files
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.har
+
 # Windows/local oddities
 NUL
 Thumbs.db
 Desktop.ini
-
-# Legacy local generated files
-ingest_run.log
-config/current_rates.json
-config/data_points_download_flow.json
