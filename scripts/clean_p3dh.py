@@ -472,28 +472,48 @@ def clean_km1_filing(c: Cleaner, cols: dict) -> None:
 
 
 def clean_ov1(c: Cleaner, cols: dict, km1_trea: dict) -> None:
-    """OV1: zero total, and a column that disagrees with KM1 TREA by 10^3 or 10^6."""
+    """OV1: zero total, and a sub-table that disagrees with KM1 TREA by 10^3 or 10^6.
+
+    The Hub can put a unit slip in one sub-table (.a or .c) only, so each sub-table is tested alone.
+    A sub-table with a total is tested with the total. The main table .a without a total is tested
+    with its largest RWEA amount (credit risk, 10% to 130% of TREA).
+    """
     for (ent, ref, per), rows in cols.items():
-        total_cells = [i for (rc, _, mc), i in rows.items() if rc == "0380" and c.live(i)]
-        total = [c.val[i] for (rc, _, mc), i in rows.items() if rc == "0380" and mc == 10 and c.live(i)]
-        credit = [c.val[i] for (rc, _, mc), i in rows.items() if rc == "0010" and mc == 10 and c.live(i)]
-        if total and max(total) == 0 and credit and max(credit) > 0:
-            for i in total_cells:
-                c.quarantine(i, "zero_total", "OV1 total is 0 while credit risk is above 0")
-            total = []
-        t = max(total) if total else None
         trea = km1_trea.get((ent, ref, per))
-        amount_cells = [i for (_, tb, _), i in rows.items() if tb in ("K_60.00.a", "K_60.00.c")]
-        if t and trea:
-            k = exponent(t / trea, powers=(3, 6))
-            if k is not None:
-                for i in amount_cells:
-                    if c.live(i):
-                        c.rescale(i, -k, "ov1_vs_km1")
-        elif t and t < TREA_MIN:
-            for i in amount_cells:
-                if c.live(i):
-                    c.quarantine(i, "suspect_scale", f"OV1 total {t:.4g} is below {TREA_MIN:.0e}")
+        for table in ("K_60.00.a", "K_60.00.c"):
+            cells = [(rc, mc, i) for (rc, tb, mc), i in rows.items() if tb == table and c.live(i)]
+            if not cells:
+                continue
+            tot = [i for rc, mc, i in cells if rc == "0380" and mc == 10]
+            credit = [c.val[i] for rc, mc, i in cells if rc == "0010" and mc == 10]
+            if tot and max(c.val[i] for i in tot) == 0 and credit and max(credit) > 0:
+                for rc, mc, i in cells:
+                    if rc == "0380":
+                        c.quarantine(i, "zero_total", "OV1 total is 0 while credit risk is above 0")
+                tot = []
+            amounts = [i for rc, mc, i in cells]
+            if tot and trea:
+                t = max(c.val[i] for i in tot)
+                k = exponent(t / trea, powers=(3, 6)) if t > 0 else None
+                if k is not None:
+                    for i in amounts:
+                        if c.live(i):
+                            c.rescale(i, -k, "ov1_vs_km1")
+            elif tot:
+                t = max(c.val[i] for i in tot)
+                if 0 < t < TREA_MIN:
+                    for i in amounts:
+                        if c.live(i):
+                            c.quarantine(i, "suspect_scale", f"OV1 total {t:.4g} is below {TREA_MIN:.0e}")
+            elif table == "K_60.00.a" and trea:
+                top = [c.val[i] for rc, mc, i in cells if mc == 10]
+                r = max(top) / trea if top else 0
+                if r > 0 and not (0.1 <= r <= 1.3):
+                    fits = [f for f in (1e3, 1e6, 1e-3, 1e-6) if 0.1 <= r * f <= 1.3]
+                    if len(fits) == 1:
+                        for i in amounts:
+                            if c.live(i):
+                                c.rescale(i, math.log10(fits[0]), "ov1_vs_km1")
 
 
 def load(conn: sqlite3.Connection, template: str) -> pd.DataFrame:

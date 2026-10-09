@@ -92,15 +92,37 @@ Use the clean layer for panels and cross-bank statistics.
 - State the basis of a time series: first reported or latest restated.
 - A non-euro bank has an FX effect in its euro amounts. Use ratios for such banks.
 
-## Templates without a clean layer
+## The generic engine (all other templates)
 
-The clean layer covers KM1 and OV1 only. These templates carry the same unit problems, in 3% to 14% of the entity-dates, and no test covers them:
+`scripts/clean_engine.py` cleans every template that has amounts and that is not handled by `clean_p3dh.py` or `clean_templates.py`. It uses no rule for a single template. It finds the rule in the data at each run.
 
-- Climate risk (K_41.00 to K_45.00), remuneration (K_30.01), IRRBB (K_68.00), insurance (K_62.01), encumbrance (K_20.01 to K_20.03), ranking in insolvency (K_95.00 to K_98.00), CCyB (K_67.01), and G-SIB (K_101.00 to K_113.00).
-- Three of 13 G-SIB banks file in million or thousand.
-- Non-monetary cells (CCR1 alpha, event counts, output floor percentage) carry the FX rate or the unit factor of the bank.
+1. **Cell type.** A cell is an amount, a ratio, or other. An amount has a median above EUR 100,000. A ratio has 90% of its values at or below 1.5.
+2. **Size of a filing.** For each bank and filing, the size is the 90th percentile of the non-zero amounts of the template.
+3. **Anchor.** The size is compared with a clean quantity of the same bank and period: total assets, leverage exposure, TREA, Tier 1, CET1, the OV1 RWEA of one risk type, or the cleaned size of another template. The engine tests every anchor.
+4. **Mode.** The log10 of size divided by anchor has one main mode for filings in EUR. Filings in thousand or million sit 3 or 6 units away. A template is clean (auto) when at least 70% of its filings are within 0.75 of the mode and the spread is at most 0.35.
+5. **Cluster vote.** The filings of one bank whose sizes agree form a cluster with one unit. All anchors of the cluster vote. A tight anchor has weight 2 and a loose anchor weight 1. No unit error is the default. A shift needs a weight of at least 3 and 1.5 times the weight of no shift. Votes that conflict remove the cluster.
+6. **Ratio cells.** A filing that reports fractions as percentages is converted when most ratio cells are above 1.5 and all are at most 150. Other ratio cells above 1.5 get the quality `suspect`.
+7. **Zero placeholders.** A filing with only zero amounts is removed when fewer than 10% of the filings of the template are all zero.
 
-Do not sum, rank, or average amounts of these templates across banks. Use them for one bank in one filing.
+A filing with no usable anchor is removed if its own KM1 failed the scale test (`scale_unresolved`). Otherwise it is kept as `unverified`.
+
+Quality values in `clean_fact`: `ok`, `ok_wide` (ratio to the anchor outside the usual range), `ok_history` (confirmed by the other filings of the bank), `rescaled`, `converted`, `suspect`, `unverified`, `untested` (not an amount), and `quarantined` (value removed).
+
+Templates that stay out of `clean_fact` have no tight anchor, too few filings, or no amounts. `docs/p3dh_template_status.md` lists each template with its reason.
+
+## New data
+
+Rule: test every new filing again. Do not assume that a bank repeats its unit.
+
+- Unit errors belong to a filing. SocGen, Raiffeisen Bank International, Zagrebacka banka, AL Sydbank, and Citibank Europe each changed unit between filings.
+- The Hub changes layouts. The sub-table letters of OV1 changed from 31/03/2026.
+- `scripts/refresh_p3dh.py` runs all steps for all data at each refresh. The steps are idempotent.
+- The engine fails closed. A filing that cannot be tested, or that two tests judge differently, has its amounts removed (`quarantined`). It is not passed.
+- History has two uses only. It confirms a shift (the other filings of the bank must support it). It also reports drift: the table `clean_run_log` keeps the mode, the share, and the removals of each template for each run, and the engine prints the templates that changed since the last run.
+- `scripts/verify_clean.py` runs after each refresh. It tests three things without the rules of the engine: (1) the sizes of neighbouring filings of one bank, (2) the arithmetic (value = raw value times factor), and (3) a list of known cases. Each new filing adds pairs to test 1. When a new unit pattern is fixed, add a known case to `CASES`.
+- Review the removed filings after each refresh: `SELECT * FROM dq_flag WHERE action = 'quarantine'`.
+
+Open item: banks that file in million or thousand in every filing and every template have no clean anchor (`scale_unresolved`). An external value of total assets (for example Bloomberg `BS_TOT_ASSET`) can set the unit for each of these banks.
 
 ## Coverage by date
 
@@ -114,6 +136,7 @@ Do not sum, rank, or average amounts of these templates across banks. Use them f
 
 - The OV1 total of Piraeus is 1% to 2% above the KM1 TREA. OV1 includes the TREA equivalent of the 1250% deduction. The difference is exact.
 - OV1 T-1 is not in the period views. The Sep-25 OV1 values come from the 30/09/2025 filing.
-- Two kinds of cells have no check: open tables (K_26.00, K_29.00, K_43.00, K_95.00 to K_98.00) and non-monetary cells (CCR1 alpha, event counts).
+- Cells that are not amounts (ratios, counts) get only the percent test. Counts that carry the FX rate (CCR1 alpha, OR1 counts) are not repaired.
+- Open tables have a blank key for one member of each cell group. The engine tests the size of the whole filing and does not repair single rows.
 - K_83.01 is not downloaded. The server times out.
 - NBG and Alpha Bank use different profit-recognition bases for CET1 in some quarters. Both values are valid.

@@ -291,54 +291,71 @@ CLEAN_NOTES = {
 }
 
 
-def write_status(conn: sqlite3.Connection, clean_df: pd.DataFrame) -> None:
+def write_status(conn: sqlite3.Connection, clean_df: pd.DataFrame | None = None) -> None:
+    """Write the template status note from the database (clean_fact and clean_calibration)."""
     tpl = pd.read_sql_query(
         """SELECT template_code, title FROM (SELECT template_code, title, ROW_NUMBER() OVER (
                PARTITION BY template_code ORDER BY reference_date DESC) rn FROM dim_template) WHERE rn = 1
            ORDER BY template_code""", conn)
     tpl["num"] = tpl["template_code"].str[2:].astype(float)
     tpl = tpl.sort_values("num")
+    cal = {}
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'clean_calibration'").fetchone():
+        cal = {r.template_code: r for r in pd.read_sql_query("SELECT * FROM clean_calibration", conn).itertuples()}
     rows = []
     for r in tpl.itertuples():
-        status, note = CLEAN_NOTES.get(r.template_code) or family_note(r.template_code)
-        rows.append((r.template_code, (r.title or "").replace("|", "/")[:90], status, note))
+        code = r.template_code
+        if code in CLEAN_NOTES:
+            status, note = CLEAN_NOTES[code]
+        else:
+            status, note = family_note(code)
+            c = cal.get(code)
+            if c is not None and c.status == "ok":
+                status = "clean (auto)"
+                note = (f"Engine test against anchor {c.anchor}: {c.share_main:.0%} of filings in the main mode "
+                        f"(spread {c.spread:.2f}). " + note)
+            elif c is not None and c.status in ("weak", "no_anchor", "too_few"):
+                note = f"No reliable scale anchor ({c.note}). " + note
+            elif c is not None and c.status == "no_amounts":
+                status, note = "no amounts", "No amount cells (ratios, counts, or text). Nothing to rescale. " + note
+        rows.append((code, (r.title or "").replace("|", "/")[:90], status, note))
     counts = pd.Series([s for _, _, s, _ in rows]).value_counts()
     lines = [
         "# P3DH template status",
         "",
         "This is the working note on the clean layer. The goal is a clean layer for every template. "
-        "`scripts/clean_templates.py` writes this file at each run. Edit the lists `CLEAN_NOTES` and "
-        "`family_note` in that script, not this file.",
+        "`scripts/clean_templates.py` and `scripts/clean_engine.py` write this file at each run. Edit the lists "
+        "`CLEAN_NOTES` and `family_note` in `clean_templates.py`, not this file.",
         "",
         "Status values:",
         "",
-        "- clean: unit, zero, and scale tests run. Use `clean_period_fact` or `clean_fact`.",
+        "- clean: unit, zero, and scale tests run with a rule for the template. Use `clean_period_fact` or `clean_fact`.",
+        "- clean (auto): the generic engine found a reliable scale anchor. Use `clean_fact`.",
         "- partly clean: some cells are tested.",
         "- not clean: no test. Use the raw `fact` table for one bank in one filing only.",
-        "- text only: no amounts.",
+        "- text only: no numeric facts.",
+        "- no amounts: numbers are ratios or counts. No unit factor applies.",
         "- not downloaded: no data in the database.",
         "",
         "Count by status: " + ", ".join(f"{k} {v}" for k, v in counts.items()) + ".",
         "",
         "## Result of the last run",
         "",
-        "| Template | Entity-filings | ok | rescaled or converted | removed |",
-        "|----------|----------------|----|-----------------------|---------|",
+        "| Template | Entity-filings | ok | rescaled or converted | with removed cells |",
+        "|----------|----------------|----|-----------------------|--------------------|",
     ]
-    per = clean_df.groupby(["template_code", "entity_key", "reference_date"])["quality"].agg(
-        lambda s: "quarantined" if (s == "quarantined").all() else
-        ("converted" if (s == "converted").any() else "rescaled" if (s == "rescaled").any() else "ok")).reset_index()
-    for code in TEMPLATES:
-        p = per[per.template_code == code]["quality"].value_counts()
-        lines.append(f"| {code} | {int(p.sum())} | {int(p.get('ok', 0))} | "
-                     f"{int(p.get('rescaled', 0) + p.get('converted', 0))} | {int(p.get('quarantined', 0))} |")
+    per = pd.read_sql_query(
+        """SELECT template_code, entity_key, reference_date, SUM(quality = 'quarantined') AS q,
+                  SUM(quality IN ('rescaled', 'converted')) AS r FROM clean_fact GROUP BY 1, 2, 3""", conn)
+    per["state"] = np.where(per["q"] > 0, "removed", np.where(per["r"] > 0, "rescaled", "ok"))
+    summary = per.groupby(["template_code", "state"]).size().unstack(fill_value=0)
+    summary["num"] = summary.index.str[2:].astype(float)
+    for code, r in summary.sort_values("num").iterrows():
+        n = int(r.get("ok", 0) + r.get("rescaled", 0) + r.get("removed", 0))
+        lines.append(f"| {code} | {n} | {int(r.get('ok', 0))} | {int(r.get('rescaled', 0))} | {int(r.get('removed', 0))} |")
     lines += ["", "## All templates", "", "| Template | Title | Status | Note |", "|----------|-------|--------|------|"]
     lines += [f"| {c} | {t} | {s} | {n} |" for c, t, s, n in rows]
-    lines += ["", "## Next in line", "",
-              "1. Credit risk and credit quality (K_21.01 to K_29.02, K_80.00 to K_87.00): anchor on total assets and CR1.",
-              "2. Liquidity and leverage (K_71.00 to K_74.00): anchor on KM1.",
-              "3. MREL, TLAC, and creditor ranking (K_90.01 to K_98.00): ratio units.",
-              "4. Climate, remuneration, and G-SIB (K_30.01, K_41.00 to K_50.00, K_100.00 to K_113.00).", ""]
+    lines += [""]
     STATUS_DOC.write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -371,7 +388,7 @@ def main() -> int:
         conn.executemany("DELETE FROM dq_flag WHERE template_code = ?", [(t,) for t in TEMPLATES])
         flags.to_sql("dq_flag", conn, if_exists="append", index=False)
         conn.executescript(VIEW)
-    write_status(conn, out)
+    write_status(conn)
     conn.close()
     return 0
 

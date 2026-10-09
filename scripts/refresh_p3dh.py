@@ -4,8 +4,10 @@
   clean_p3dh.py        tests units and dates, writes clean_period_fact and dq_flag
   classify_p3dh.py     writes the geography and size classes
   clean_templates.py   cleans IRRBB1 and encumbrance (AE1 to AE3), writes the template status note
+  clean_engine.py      generic unit, zero, and ratio tests for every other template with amounts
+  verify_clean.py      independent check of the clean layer (neighbouring filings, arithmetic, known cases)
 
-The four steps run in order. The script stops at the first step that fails.
+The six steps run in order. The script stops at the first step that fails.
 
   PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/refresh_p3dh.py
 """
@@ -17,7 +19,7 @@ import sys
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
-STEPS = ("build_p3dh_db.py", "clean_p3dh.py", "classify_p3dh.py", "clean_templates.py")
+STEPS = ("build_p3dh_db.py", "clean_p3dh.py", "classify_p3dh.py", "clean_templates.py", "clean_engine.py", "verify_clean.py")
 
 
 def main() -> int:
