@@ -146,6 +146,20 @@ WHERE template_code = 'K_61.00' AND row_code = '0050'
 ORDER BY period_end;
 ```
 
+## Dashboard
+
+The dashboard is a local Streamlit app. It opens the database read-only and listens on `localhost` only. It needs no account, no registration, and no network. Usage statistics are off (`dashboard/.streamlit/config.toml`).
+
+```bash
+python -m venv dashboard/.venv
+dashboard/.venv/Scripts/pip install -r dashboard/requirements.txt
+dashboard/.venv/Scripts/python -m streamlit run dashboard/Overview.py --server.port 8765
+```
+
+On Windows, double-click `dashboard/run_dashboard.bat`. Then open `http://localhost:8765`.
+
+Pages: Overview, Peer explorer (KM1 by size and geography), Greek banks (against a cohort median), IRRBB, Encumbrance, Entity browser, Data quality (includes the template status note). The pages read the clean layer. After `scripts/refresh_p3dh.py` the pages show the new data without a restart.
+
 ## Rules
 
 - Run one downloader process at a time. A lock file in `data/runs/p3dh` enforces this. The default limit is 60 requests per minute.
