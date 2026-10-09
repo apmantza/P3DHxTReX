@@ -225,7 +225,9 @@ def load_file(conn: sqlite3.Connection, path: Path, folder: str, manifest: dict)
         raise ValueError(f"{path.name}: fact_type must be 'number' or 'text'")
     if (has_num & (frame["value"] == "")).any() or (has_num & (frame["value_text"] != "")).any():
         raise ValueError(f"{path.name}: a number fact has no value or has text")
-    frame["value"] = pd.to_numeric(frame["value"].replace("", None), errors="raise")
+    # float() is exact. pandas to_numeric changes the 13th digit of some numbers.
+    frame["value"] = pd.Series([float(s) if s != "" else None for s in frame["value"]],
+                               index=frame.index, dtype="float64")
     frame["value_text"] = frame["value_text"].where(has_text, None)
     ents_frame = frame.drop_duplicates(["lei", "entity_name"])[["lei", "entity_name", "country"]]
 
@@ -319,6 +321,18 @@ def main() -> int:
            GROUP BY entity_key, template_code, period_end, row_code, key_descriptor, sheet, measure_col,
                     reference_date, table_code
            HAVING COUNT(*) > 1)""").fetchone()[0]
+
+    # OV1 T-1 is the previous disclosure date. It must never enter the quarterly period views.
+    ov1_prior = conn.execute(
+        "SELECT COUNT(*) FROM v_period_fact WHERE template_code = 'K_60.00' AND period_offset > 0"
+    ).fetchone()[0]
+    off_grid = conn.execute(
+        "SELECT COUNT(*) FROM v_period_fact WHERE SUBSTR(reference_date, 6, 2) NOT IN ('03', '06', '09', '12')"
+    ).fetchone()[0]
+    for label, n in (("OV1 T-n rows in v_period_fact", ov1_prior), ("off-quarter rows in v_period_fact", off_grid)):
+        if n:
+            print(f"  ASSERTION FAILED: {n} {label}", file=sys.stderr)
+    dup_groups += ov1_prior + off_grid
 
     # integrity: fact counts must equal the ledger
     bad = conn.execute(

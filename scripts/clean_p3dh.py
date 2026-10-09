@@ -147,6 +147,68 @@ def check_labels(df: pd.DataFrame) -> None:
             raise ValueError(f"KM1 row {r.row_code} has label {label!r}; expected {KM1_LABELS[r.row_code]!r}")
 
 
+def quarters_back(ref: str, n: int) -> str:
+    return (pd.Timestamp(ref) + pd.offsets.MonthEnd(-3 * n)).strftime("%Y-%m-%d")
+
+
+def fix_period_shift(c: Cleaner, cols_by_filing: dict) -> None:
+    """A half-yearly bank can fill T-1 with the previous disclosure date (6 months back).
+
+    The test compares the three capital ratios of a column T-k with column T of the same bank
+    in the filings 1 to 6 quarters earlier. A match at another lag than k shows the real period.
+    One other lag: the column gets that period. Several lags, or a collision with another
+    column of the filing: the cells are removed.
+    """
+    def ratios(rows):
+        vals = [c.raw[rows[x]] if x in rows else None for x in ("0050", "0060", "0070")]
+        if any(v is None or not (0 < v < 1.5) for v in vals):
+            return None
+        return tuple(round(float(v), 6) for v in vals)
+
+    t0 = {key: ratios(cols[0]) for key, cols in cols_by_filing.items() if 0 in cols}
+    for (ent, ref), cols in cols_by_filing.items():
+        found, bad, aligned = {}, set(), set()
+        for k, rows in cols.items():
+            if k == 0:
+                continue
+            tk = ratios(rows)
+            if tk is None:
+                continue
+            lags = [j for j in range(1, 9) if t0.get((ent, quarters_back(ref, j))) == tk]
+            if not lags:
+                continue
+            if k in lags:
+                aligned.add(k)
+            elif len(lags) == 1:
+                found[k] = lags[0]
+            else:
+                bad.add(k)
+        if not found and not bad:
+            continue
+        # A bank that files at half-year spacing has T-1 = 2 quarters back, T-2 = 4 quarters back, and so on.
+        steps = {j / k for k, j in found.items()}
+        new_period = {}
+        if found and not bad and not aligned and len(steps) == 1 and steps <= {2.0, 3.0, 4.0}:
+            step = int(steps.pop())
+            new_period = {k: quarters_back(ref, step * k) for k in cols if k > 0}
+        else:
+            new_period = {k: quarters_back(ref, j) for k, j in found.items()}
+        for k, p in new_period.items():
+            if p != c.df.at[next(iter(cols[k].values())), "period_end"]:
+                c.log(next(iter(cols[k].values())), "period_shift", "redate", None, f"T-{k} holds {p}")
+        periods = {k: new_period.get(k, c.df.at[next(iter(r.values())), "period_end"]) for k, r in cols.items()}
+        clash = {k for k in new_period if sum(1 for v in periods.values() if v == periods[k]) > 1}
+        clash |= {k for k, v in periods.items() if any(v == periods[m] for m in clash) and k != 0}
+        for k in bad | clash:
+            for i in cols[k].values():
+                c.quarantine(i, "period_shift", f"T-{k} cannot be dated (several matches or two columns for one period)")
+        for k, p in new_period.items():
+            if k in clash:
+                continue
+            for i in cols[k].values():
+                c.df.at[i, "period_end"] = p
+
+
 def clean_km1_column(c: Cleaner, rows: dict, siblings: list) -> None:
     """Tests inside one column (one filing, one period). `siblings` are the other columns of the filing."""
     g = lambda code: c.get(rows, code)  # noqa: E731
@@ -455,6 +517,7 @@ def run(conn: sqlite3.Connection):
         if r.row_code in rows:
             raise ValueError(f"duplicate KM1 cell {r}")
         rows[r.row_code] = i
+    fix_period_shift(ck, cols_by_filing)
     for filing in cols_by_filing.values():
         for rows in filing.values():
             clean_km1_column(ck, rows, [r for r in filing.values() if r is not rows])
