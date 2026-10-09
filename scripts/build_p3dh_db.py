@@ -88,7 +88,8 @@ CREATE TABLE IF NOT EXISTS entity (
 );
 CREATE TABLE IF NOT EXISTS period_template (
     template_code TEXT PRIMARY KEY,
-    months_per_period INTEGER NOT NULL
+    months_per_period INTEGER NOT NULL,
+    max_offset INTEGER NOT NULL DEFAULT 4
 );
 CREATE TABLE IF NOT EXISTS fact (
     reference_date TEXT NOT NULL,
@@ -135,7 +136,7 @@ SELECT q.*,
             '+1 month', '-1 day') AS period_end,
        CAST(q.column_code AS INTEGER) - 10 * q.period_offset AS measure_col
 FROM (
-    SELECT f.*, e.lei, e.entity_name, e.country, e.entity_key, pt.months_per_period,
+    SELECT f.*, e.lei, e.entity_name, e.country, e.entity_key, pt.months_per_period, pt.max_offset,
            CASE WHEN f.cell_code LIKE '{%,%' THEN SUBSTR(f.cell_code, 2, INSTR(f.cell_code, ',') - 2)
                 ELSE f.template_code END AS table_code,
            CASE WHEN INSTR(f.column_label, 'T-') > 0
@@ -144,17 +145,20 @@ FROM (
     FROM fact f
     JOIN entity e ON e.entity_id = f.entity_id
     JOIN period_template pt ON pt.template_code = f.template_code
-    WHERE f.column_label GLOB '[a-z]. T' OR f.column_label GLOB '[a-z]. T-[0-9]*'
-) q;
+    WHERE (f.column_label GLOB '[a-z]. T' OR f.column_label GLOB '[a-z]. T-[0-9]*')
+      AND SUBSTR(f.reference_date, 6, 2) IN ('03', '06', '09', '12')
+) q
+WHERE q.period_offset <= q.max_offset;
 
 DROP VIEW IF EXISTS v_latest_period_fact;
 CREATE VIEW v_latest_period_fact AS
 SELECT * FROM (
     SELECT p.*, ROW_NUMBER() OVER (
-        PARTITION BY p.entity_key, p.table_code, p.period_end, p.row_code, p.key_descriptor, p.sheet,
+        PARTITION BY p.entity_key, p.template_code, p.period_end, p.row_code, p.key_descriptor, p.sheet,
                      p.measure_col
-        ORDER BY p.reference_date DESC) AS rn
+        ORDER BY p.reference_date DESC, p.table_code ASC) AS rn
     FROM v_period_fact p
+    WHERE p.value IS NOT NULL
 ) WHERE rn = 1;
 """
 
@@ -292,8 +296,12 @@ def main() -> int:
                 )
         conn.commit()
 
-    conn.executemany("INSERT OR IGNORE INTO period_template VALUES (?, ?)",
-                     [("K_60.00", 3), ("K_61.00", 3)])
+    if "max_offset" not in {r[1] for r in conn.execute("PRAGMA table_info(period_template)")}:
+        conn.execute("ALTER TABLE period_template ADD COLUMN max_offset INTEGER NOT NULL DEFAULT 4")
+    # KM1 columns T to T-4 are quarters. In OV1, T-1 is the previous disclosure date: 3, 6 or
+    # 12 months back, depending on the bank. Only the T column of OV1 enters the period views.
+    conn.executemany("INSERT OR REPLACE INTO period_template VALUES (?, ?, ?)",
+                     [("K_60.00", 3, 0), ("K_61.00", 3, 4)])
     # An LEI is one entity across filings (names change after renames and mergers). It is
     # two entities only if one filing holds the LEI under two names.
     conn.execute("UPDATE entity SET entity_key = lei")
@@ -304,9 +312,12 @@ def main() -> int:
                GROUP BY lei, d HAVING COUNT(*) > 1)""")
     conn.executescript(VIEWS)
     conn.commit()
+    # The latest view keeps one row per key. A tie is two rows of one filing that share the key
+    # and the sort values (same filing, same sub-table). A tie makes the choice arbitrary.
     dup_groups = conn.execute(
-        """SELECT COUNT(*) FROM (SELECT 1 FROM v_latest_period_fact
-           GROUP BY entity_key, table_code, period_end, row_code, key_descriptor, sheet, measure_col
+        """SELECT COUNT(*) FROM (SELECT 1 FROM v_period_fact
+           GROUP BY entity_key, template_code, period_end, row_code, key_descriptor, sheet, measure_col,
+                    reference_date, table_code
            HAVING COUNT(*) > 1)""").fetchone()[0]
 
     # integrity: fact counts must equal the ledger

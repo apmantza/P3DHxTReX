@@ -34,6 +34,12 @@ Load the files into SQLite. The loader is incremental. It reloads only files who
 PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/build_p3dh_db.py
 ```
 
+Test KM1 and OV1 for wrong units and zero placeholders. The script writes the tables `dq_flag` and `clean_period_fact`. Run it after each load:
+
+```bash
+PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/clean_p3dh.py
+```
+
 Verify the files, the manifest, and the raw archive:
 
 ```bash
@@ -78,12 +84,19 @@ Views:
 
 - `v_fact`: facts with entity name, country, and `entity_key`.
 - `v_coverage`: every template that the portal lists, with its download status.
-- `v_period_fact`: facts in columns that are labelled `T` or `T-n`, with `period_end`.
-- `v_latest_period_fact`: for each entity, quarter, row, and measure, the value from the latest filing.
+- `v_period_fact`: facts in columns that are labelled `T` or `T-n`, with `period_end`. It has one row for each filing, so a quarter can appear in several filings.
+- `v_latest_period_fact`: for each entity, quarter, row, and measure, the value from the latest filing. The sub-table `.a` wins over `.c` in one filing. It does not test units. Use `clean_period_fact` for panels.
 
-Later filings restate earlier quarters. Use `v_latest_period_fact` when you need the latest value.
+Tables from `scripts/clean_p3dh.py`:
 
-The meaning of `T-n` differs between templates. For example, OR1 uses years. Only the templates in the table `period_template` (now KM1 and OV1, both quarterly) appear in the two period views. Add a template to that table only after you check what its columns mean.
+- `clean_period_fact`: the same rows after the unit and zero tests. `value` is the clean value, `value_raw` is the value from the Hub, `quality` is `ok` or `rescaled`, and `factor` is the multiplier.
+- `dq_flag`: every cell that the tests changed or removed, with the check name and the factor.
+
+Later filings restate earlier quarters. Use `clean_period_fact` when you need the latest valid value.
+
+The meaning of `T-n` differs between templates. For example, OR1 uses years. Only the templates in the table `period_template` appear in the period views. KM1 uses columns T to T-4 (quarters). OV1 uses column T only, because OV1 T-1 is the previous disclosure date (3, 6, or 12 months back). Add a template to that table only after you check what its columns mean. A filing with a reference date that is not a quarter end (31/10/2025) is not in the period views.
+
+`docs/p3dh_data_quality.md` is the data dictionary. It lists the source problems and the rules of the clean layer.
 
 `entity_key` is the LEI. It is the LEI plus the name only when one filing holds the same LEI under two names (Aareal Bank AG and Atlantic Lux HoldCo). A renamed entity keeps one key across filings.
 
