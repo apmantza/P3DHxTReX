@@ -34,11 +34,13 @@ Load the files into SQLite. The loader is incremental. It reloads only files who
 PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/build_p3dh_db.py
 ```
 
-Test KM1 and OV1 for wrong units and zero placeholders. The script writes the tables `dq_flag` and `clean_period_fact`. Run it after each load:
+Refresh all derived tables after a download or a load. This runs the four steps below in order (load, clean KM1 and OV1, classify, clean IRRBB and encumbrance):
 
 ```bash
-PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/clean_p3dh.py
+PYTHONIOENCODING=utf-8 .venv/Scripts/python scripts/refresh_p3dh.py
 ```
+
+The steps can run alone. `clean_p3dh.py` tests KM1 and OV1 for wrong units and zero placeholders and writes `dq_flag` and `clean_period_fact`. `classify_p3dh.py` writes the geography and size classes. `clean_templates.py` cleans IRRBB1 (`K_68.00`) and encumbrance (`K_20.01` to `K_20.03`), writes `clean_fact`, and writes the working note `docs/p3dh_template_status.md`.
 
 Verify the files, the manifest, and the raw archive:
 
@@ -92,7 +94,24 @@ Tables from `scripts/clean_p3dh.py`:
 - `clean_period_fact`: the same rows after the unit and zero tests. `value` is the clean value, `value_raw` is the value from the Hub, `quality` is `ok` or `rescaled`, and `factor` is the multiplier.
 - `dq_flag`: every cell that the tests changed or removed, with the check name and the factor.
 
+- `clean_fact`: the facts of IRRBB1 and AE1 to AE3 with `value_raw`, `value`, `quality`, `unit_inferred`, and `factor`. The view `v_clean_fact` leaves out the removed values (`quality` is `quarantined`).
+
 Later filings restate earlier quarters. Use `clean_period_fact` when you need the latest valid value.
+
+### Geography and size
+
+Each entity has a country group and a size class. `classify_p3dh.py` computes them.
+
+- `v_entity_class`: one row for each entity: country, ISO code, region, peer group (greek, periphery, core, other), euro area flag, current total assets in EUR, `size_basis` (`total_assets` or `leverage_exposure`), and `size_class`.
+- `v_entity_assets_class`: the same for each entity and period end (total assets over time).
+- `dim_country` and `dim_size_class`: lookup tables. Edit them with SQL. The views read them at query time.
+- `entity_assets` and `entity_size_current`: total assets of the published financial statements, with the test result of each value.
+
+Size classes (total assets in EUR): Small below 10bn, Medium 10bn to 100bn, Large 100bn to 250bn, Very large 250bn and above. An entity with no total assets uses the leverage exposure of KM1 (`size_basis`). An entity with neither value is `Unclassified`.
+
+```sql
+SELECT size_class, peer_group, COUNT(*) FROM v_entity_class GROUP BY 1, 2;
+```
 
 The meaning of `T-n` differs between templates. For example, OR1 uses years. Only the templates in the table `period_template` appear in the period views. KM1 uses columns T to T-4 (quarters). OV1 uses column T only, because OV1 T-1 is the previous disclosure date (3, 6, or 12 months back). Add a template to that table only after you check what its columns mean. A filing with a reference date that is not a quarter end (31/10/2025) is not in the period views.
 
