@@ -64,9 +64,12 @@ def unit_tests() -> None:
     check("price is multiple times TBV", close(v["price"], price))
     check("all cash: CET1 falls by the price", close(v["cet1"], 14e9 - price))
     check("cash leaves HQLA and exposure by the same amount", close(v["hqla"], 52e9 - price) and close(v["lev_exp"], 340e9 - price))
-    check("goodwill is price minus equity", close(v["goodwill"], price - 4.6e9))
-    eq_route = (a["cet1"] + 0.0 - v["goodwill"] - 0.4e9 - (4.6e9 - 0.4e9 - t["cet1"]))
-    check("CET1 equals the equity route (equity - goodwill - intangibles - other deductions)", close(v["cet1"], eq_route))
+    check("goodwill is price minus tangible book", close(v["goodwill"], price - 4.2e9))
+    eq_route = a["cet1"] + v["shares"] - (4.6e9 - 0.4e9 - t["cet1"]) - v["goodwill"]
+    check("CET1 equals the equity route (parent equity + new shares - other deductions of the target - new goodwill)", close(v["cet1"], eq_route))
+    at_book = mm.core(acq, tgt, mm.Deal(cash_share=1.0, multiple=1.0))[0]
+    check("price at tangible book: no goodwill and no bargain gain", at_book["goodwill"] == 0 and at_book["bargain_gain"] == 0)
+    check("total assets: target intangibles replaced by goodwill", close(v["total_assets"], 260e9 + 95e9 - 0.4e9 + v["dliq"] + v["goodwill"]))
 
     costs = mm.Deal(cash_share=0.0, transaction_pct=0.02, integration_pct=0.1, fv_markdown_pct=0.05, tax_rate=0.25)
     v, a, t = mm.core(acq, tgt, costs)
@@ -84,7 +87,7 @@ def unit_tests() -> None:
     req_t = 0.045 + t["p2r_cet1"] + t["cbr"]
     nci = 0.4 * min(t["cet1"], req_t * t["trea"])
     check("60% stake: NCI is limited by the CET1 requirement", close(v["nci_eligible"], nci))
-    check("60% stake: CET1 formula", close(v["cet1"], 14e9 - v["price"] + nci - 0.4 * 4.6e9))
+    check("60% stake: CET1 formula", close(v["cet1"], 14e9 - v["price"] + nci - 0.4 * 4.2e9))
     check("60% stake: RWA is fully consolidated", close(v["trea"], 110e9))
 
     fund = mm.Deal(cash_share=1.0, new_cet1=1e9, new_at1=0.5e9, new_snp=2e9)

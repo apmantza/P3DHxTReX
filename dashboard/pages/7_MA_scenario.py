@@ -182,9 +182,24 @@ with tabs[0]:
         ("Price over tangible book", fmt(v["price"] / (stake * v["tbv_target"]) if v["tbv_target"] and stake else NAN, "x")),
         ("Price over book equity", fmt(v["price"] / (stake * v["equity_target"]) if v["equity_target"] and stake else NAN, "x")),
         ("Cash paid (EUR bn)", fmt(v["cash"], "bn")), ("Shares issued (EUR bn)", fmt(v["shares"], "bn")),
-        ("Goodwill created: price above fair value of net assets (EUR bn)", fmt(v["goodwill"], "bn")), ("Gain from a bargain purchase: price below fair value of net assets (EUR bn)", fmt(v["bargain_gain"], "bn")),
+        ("Target intangible assets written off (replaced by the new goodwill) (EUR bn)", fmt(t["intangibles"] * 1, "bn")),
+        ("New goodwill: price above fair value of tangible net assets (EUR bn)", fmt(v["goodwill"], "bn")), ("Gain from a bargain purchase: price below fair value of tangible net assets (EUR bn)", fmt(v["bargain_gain"], "bn")),
         ("Change of cash and liquid assets (EUR bn)", fmt(v["dliq"], "bn"))], columns=["Item", "Value"])
     st.dataframe(terms, hide_index=True, width="stretch", height=(len(terms) + 1) * 35 + 3)
+    st.markdown("**From book equity to CET1 (CC1)**")
+    bridge = pd.DataFrame([
+        ("Common equity before adjustments (CC1 row 6)", a["equity"], t["equity"]),
+        ("less intangible assets (net of tax liability)", -a["intangibles"], -t["intangibles"]),
+        ("= Tangible book value used for the price", max(a["equity"] - a["intangibles"], 0.0) if not isnan(a["equity"]) else NAN, v["tbv_target"]),
+        ("less other deductions (value adjustments, deferred tax, expected loss shortfall, pension assets, others)",
+         -a["other_deductions"] if not isnan(a["other_deductions"]) else a["cet1"] - a["equity"] + a["intangibles"],
+         -t["other_deductions"] if not isnan(t["other_deductions"]) else t["cet1"] - t["equity"] + t["intangibles"]),
+        ("= CET1 capital (KM1)", a["cet1"], t["cet1"])], columns=["Item (EUR m)", "Acquirer", "Target"])
+    for c in ("Acquirer", "Target"):
+        bridge[c] = [("n/a" if isnan(x) else f"{x / 1e6:,.0f}") for x in bridge[c]]
+    st.dataframe(bridge, hide_index=True, width="stretch", height=(len(bridge) + 1) * 35 + 3)
+    st.caption("The price base is the tangible book value. It is higher than CET1 by the other deductions. "
+               "The purchase accounting writes off the intangible assets of the target and books new goodwill. CET1 is the same under both views.")
     if not isnan(v.get("cap_max_cash", NAN)):
         st.markdown(f"**Capacity at a CET1 floor of {floor:.2%}**")
         st.write(f"- Largest cash payment: EUR {v['cap_max_cash'] / 1e9:,.2f}bn ({fmt(v['cap_max_cash_share'], 'pct1')} of this price).")

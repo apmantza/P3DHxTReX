@@ -53,17 +53,25 @@ Notation: `k` is the stake. `P` is the price for the stake. `C` is the cash part
 **Fair value and costs.** After-tax fair value write-down `F = write-down % x TBV x (1 - tax)`.
 After-tax integration cost `N = integration % x TBV x (1 - tax)`. Transaction cost `X = transaction % x P`.
 
-**Goodwill.** Goodwill = `max(P - k x (E - F), 0)`. A negative result is a gain from a bargain purchase.
-The model keeps the intangible assets of the target at book value.
+**Goodwill.** The purchase accounting writes off the existing intangible assets of the target (`I`) and books new goodwill.
+Goodwill = `max(P - k x (TBV - F), 0)`, with `TBV = E - I`. A negative result is a gain from a bargain purchase.
+A price of exactly 1.0 times tangible book therefore gives no goodwill and no gain.
+CC1 does not split `I` into goodwill and other intangible assets, so the model treats all of `I` the same way.
 
 **Pro-forma CET1.**
 
 `CET1 = CET1(A) + CET1(T) - C + NCI(eligible) - NCI(removed) - k x F - N - X + new CET1`
 
-The equity route gives the same result. The result does not depend on the split between goodwill and other items.
+The equity route gives the same result: parent equity + new shares - the other deductions of the target - new goodwill.
+The result does not depend on the split between goodwill and other items.
 A deal paid in shares with no cost adds the two CET1 amounts. Each euro of cash paid reduces CET1 by one euro.
 
-Minority interest applies when `k` is below 100%. `NCI(removed) = (1 - k) x E`.
+**Book equity and CET1.** Tangible book value is higher than CET1. CET1 also deducts additional value adjustments, deferred tax assets,
+the expected-loss shortfall, pension assets, and other regulatory adjustments. The page shows the bridge from CC1 row 6 to KM1 CET1 for both banks.
+The model flags a bank where CC1 row 6 plus the total adjustments (row 28) differs from KM1 CET1 by more than 2%.
+This happens for about 4% of the banks (411 tested at their latest quarter).
+
+Minority interest applies when `k` is below 100%. `NCI(removed) = (1 - k) x TBV`.
 `NCI(eligible) = (1 - k) x min(CET1(T), CET1 requirement of T x TREA(T))`. This follows the rule of Article 84 CRR in a simple form.
 
 **Other capital.** AT1 and Tier 2 are the sum of both banks, times the recognition factor for the target, plus new instruments.
@@ -101,7 +109,7 @@ It divides the sum by the pro-forma Tier 1 capital. The supervisory limit is 15%
 **Capacity.** The page shows the largest cash payment and the largest price multiple that keep the CET1 ratio at or above your floor.
 CET1 falls one for one with cash, so two model runs give both limits.
 
-**Size class.** The model adds total assets, the change of cash, and goodwill. It applies the same limits as the classification
+**Size class.** The model adds total assets, the change of cash, and new goodwill, and removes the intangible assets of the target. It applies the same limits as the classification
 (10 bn, 100 bn, and 250 bn euro).
 
 ## Limits

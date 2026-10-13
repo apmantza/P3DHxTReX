@@ -113,6 +113,9 @@ def _base(bank: BankData, flags: list[tuple[str, str]], side: str) -> dict[str, 
     b["lev_req"] = lev_req if lev_req is not None else LEV_MIN + _nz(bank.get("lev_p2r")) + b["lev_buffer"]
     b["equity"] = _nz(bank.get("cc1_cet1_before_adj") or bank.get("cc2_equity"), NAN)
     b["intangibles"] = abs(_nz(bank.get("cc1_intangibles")))
+    adj = bank.get("cc1_total_adj")
+    b["total_adj"] = abs(adj) if adj is not None else NAN
+    b["other_deductions"] = max(b["total_adj"] - b["intangibles"], 0.0) if not math.isnan(b["total_adj"]) else NAN
     ofel = bank.get("km2_ofel")
     b["km2_found"] = float(ofel is not None)
     b["ofel"] = ofel if ofel is not None else b["tc"]
@@ -192,16 +195,16 @@ def core(acq: BankData, tgt: BankData, deal: Deal, flags: list[tuple[str, str]] 
     txn = deal.transaction_pct * price
     req_t_cet1 = P1_CET1 + t["p2r_cet1"] + t["cbr"]
     nci_elig = (1 - k) * min(t["cet1"], req_t_cet1 * t["trea"]) if k < 1 else 0.0
-    nci_out = (1 - k) * equity if k < 1 else 0.0
+    nci_out = (1 - k) * tbv if k < 1 else 0.0
     funding = deal.new_cet1 + deal.new_at1 + deal.new_t2 + deal.new_snp + deal.new_snr
     dliq = funding - cash - txn - integ_pre
 
     v: dict[str, float] = {"price": price, "tbv_target": tbv, "equity_target": equity, "cash": cash, "shares": shares,
                            "txn_cost": txn, "integration_after_tax": integ_at, "fv_after_tax": fv_at, "dliq": dliq,
                            "nci_eligible": nci_elig, "nci_removed": nci_out, "funding": funding}
-    v["goodwill_gross"] = price - k * (equity - fv_at)
-    v["goodwill"] = max(v["goodwill_gross"], 0.0)
-    v["bargain_gain"] = max(-v["goodwill_gross"], 0.0)
+    v["goodwill_gross"] = price - k * (tbv - fv_at)
+    v["goodwill"] = max(v["goodwill_gross"], 0.0) + 0.0
+    v["bargain_gain"] = max(-v["goodwill_gross"], 0.0) + 0.0
 
     v["cet1"] = a["cet1"] + t["cet1"] - cash + nci_elig - nci_out - k * fv_at - integ_at - txn + deal.new_cet1
     v["at1"] = a["at1"] + deal.instr_recognition * t["at1"] + deal.new_at1
@@ -211,7 +214,7 @@ def core(acq: BankData, tgt: BankData, deal: Deal, flags: list[tuple[str, str]] 
     ra, rt = a["trea"] * (1 + deal.rwa_acq_change), t["trea"] * (1 + deal.rwa_tgt_change)
     v["trea"] = ra + rt
     v["lev_exp"] = a["lev_exp"] + t["lev_exp"] * (1 - deal.exposure_elim_pct) + dliq
-    v["total_assets"] = a["total_assets"] + t["total_assets"] + dliq + v["goodwill"]
+    v["total_assets"] = a["total_assets"] + t["total_assets"] - t["intangibles"] + dliq + v["goodwill"]
     v["cet1_ratio"], v["t1_ratio"], v["tc_ratio"] = _div(v["cet1"], v["trea"]), _div(v["t1"], v["trea"]), _div(v["tc"], v["trea"])
     v["lev_ratio"] = _div(v["t1"], v["lev_exp"])
 
@@ -310,6 +313,10 @@ def data_flags(acq: BankData, tgt: BankData, v: dict[str, float], a: dict[str, f
     if math.isnan(a["req_trea"]):
         out.append(("warn", "Acquirer: no MREL requirement in KM2. MREL headroom is not available."))
     for side, m in (("Acquirer", a), ("Target", t)):
+        if not math.isnan(m["total_adj"]) and not math.isnan(m["equity"]):
+            gap = m["equity"] - m["total_adj"] - m["cet1"]
+            if abs(gap) > 0.02 * m["cet1"]:
+                out.append(("warn", f"{side}: CC1 does not add up. Equity before adjustments minus adjustments differs from KM1 CET1 by EUR {gap / 1e6:,.0f}m."))
         for names, what in ((("lev_exp",), "leverage exposure"), (("hqla", "net_outflow"), "LCR inputs"), (("asf", "rsf"), "NSFR inputs")):
             if any(math.isnan(m[n]) for n in names):
                 out.append(("warn", f"{side}: no {what} in KM1. The pro-forma value is not available."))

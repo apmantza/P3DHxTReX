@@ -30,6 +30,7 @@ OV1 = {"rwa_credit": "0010", "rwa_ccr": "0070", "rwa_cva": "0120", "rwa_securiti
 CELLS = {
     "cc1_cet1_before_adj": ("K_66.01", "0110", "0010"),
     "cc1_intangibles": ("K_66.01", "0130", "0010"),
+    "cc1_total_adj": ("K_66.01", "0360", "0010"),
     "cc1_minority": ("K_66.01", "0090", "0010"),
     "cc1_dta_deducted": ("K_66.01", "0140", "0010"),
     "cc1_dta_temporary": ("K_66.01", "0280", "0010"),
