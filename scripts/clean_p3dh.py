@@ -69,12 +69,14 @@ KM1_LABELS = {
     "0330": r"18\. Total available stable funding", "0340": r"19\. Total required stable funding",
     "0350": r"20\. NSFR ratio \(%\)",
 }
+LIQUIDITY_ROWS = {"0280", "0290", "0300", "0310", "0330", "0340"}
 TREA_MIN, TREA_MAX = 1e7, 5e12
 CET1_MAX = 5e11
 POWER_TOL = 0.06
 FX_TOL = 0.08
 SENTINELS = (999999.0, 999999999.0)
 CAPITAL4 = ("0010", "0020", "0030", "0040")
+ANCHORS = ("0040", "0210", "0010", "0030", "0020")
 
 
 def plaus_capital(r: float) -> bool:
@@ -83,6 +85,21 @@ def plaus_capital(r: float) -> bool:
 
 def plaus_leverage(r: float) -> bool:
     return 0.005 <= r <= 0.6
+
+
+PEG = 1000 / 1.95583  # Bulgarian lev: EUR value of a figure in BGN thousand (fixed peg until 2025-12-31)
+LOG_PEG = math.log10(PEG)
+
+
+def scale_exponent(ratio: float, powers=(3, 6), tol: float = POWER_TOL, peg: bool = True):
+    """Like exponent(), and also the Bulgarian lev peg (the Hub did not convert one bank, UBB)."""
+    k = exponent(ratio, powers=powers, tol=tol)
+    if k is None and peg and ratio and math.isfinite(ratio) and ratio > 0:
+        if abs(ratio / PEG - 1) <= 0.01:
+            return LOG_PEG
+        if abs(ratio * PEG - 1) <= 0.01:
+            return -LOG_PEG
+    return k
 
 
 def exponent(ratio: float, powers=(2, 3, 4, 6), tol: float = POWER_TOL):
@@ -361,22 +378,28 @@ def clean_km1_column(c: Cleaner, rows: dict, siblings: list) -> None:
 
 
 def clean_km1_across_filings(c: Cleaner, cols_by_filing: dict) -> None:
-    """TREA of one quarter across filings, then the absolute size test."""
+    """The anchor amounts of one quarter across filings, then the absolute size test.
+
+    TREA is the first anchor. A bank without TREA in a column uses leverage exposure, CET1, total capital,
+    or Tier 1 as the anchor, in this order.
+    """
     by_period = defaultdict(list)
-    trea_of = {}
     for (ent, ref), cols in cols_by_filing.items():
         for po, rows in cols.items():
-            t = c.get(rows, "0040")
-            if t:
-                trea_of[(ent, ref, po)] = t
-                by_period[(ent, c.df.at[rows["0040"], "period_end"])].append((ref, po, t))
+            has_trea = c.get(rows, "0040") is not None
+            for code in ANCHORS:
+                if code != "0040" and has_trea:
+                    continue
+                t = c.get(rows, code)
+                if t:
+                    by_period[(ent, c.df.at[rows[code], "period_end"], code)].append((ref, po, t))
     votes = defaultdict(list)
-    for (ent, _), items in by_period.items():
+    for (ent, _, _), items in by_period.items():
         for a in items:
             for b in items:
                 if a[0] == b[0] or a[2] <= b[2]:
                     continue
-                k = exponent(a[2] / b[2], powers=(3, 6), tol=FX_TOL)
+                k = scale_exponent(a[2] / b[2], powers=(3, 6), tol=FX_TOL)
                 if k is None:
                     continue
                 if b[2] * 10.0 ** k <= TREA_MAX:
@@ -391,18 +414,37 @@ def clean_km1_across_filings(c: Cleaner, cols_by_filing: dict) -> None:
         if not voted:
             continue
         e = Counter(voted.values()).most_common(1)[0][0]
-        base = [trea_of[(ent, ref, po)] for po in voted if (ent, ref, po) in trea_of]
-        if not base:
-            continue
-        ref_val = float(np.median(base))
         for po in cols:
-            t = trea_of.get((ent, ref, po))
-            if (ent, ref, po) not in applied and t and 1 / 3 <= t / ref_val <= 3:
+            if (ent, ref, po) in applied:
+                continue
+            ratios = []
+            for code in ANCHORS:
+                mine = c.get(cols[po], code)
+                peers = [p for p in (c.get(cols[q], code) for q in voted) if p]
+                if mine and peers:
+                    ratios.append(mine / float(np.median(peers)))
+            if ratios and 1 / 3 <= float(np.median(ratios)) <= 3:
                 applied[(ent, ref, po)] = e
     for (ent, ref, po), e in applied.items():
-        i = cols_by_filing[(ent, ref)][po]["0040"]
-        if c.live(i):
-            c.rescale(i, e, "cross_filing")
+        rows = cols_by_filing[(ent, ref)][po]
+        i = rows["0040"] if "0040" in rows else None
+        if not c.live(i):
+            # No TREA in this column. The amounts of the column sit on one scale and move together.
+            for code in AMOUNT.values():
+                j = rows.get(code)
+                if c.live(j) and c.qual[j] != "rescaled":
+                    c.rescale(j, e, "bgn_peg" if abs(e - LOG_PEG) < 1e-9 else "cross_filing")
+            continue
+        old_trea = float(c.val[i])
+        c.rescale(i, e, "bgn_peg" if abs(e - LOG_PEG) < 1e-9 else "cross_filing")
+        # The other amounts of the column that sat on the scale of the old TREA move with it. An amount
+        # that does not fit the old TREA is left to the later tests.
+        for code, (lo, hi) in TREA_RANGE.items():
+            j = rows.get(code)
+            if not c.live(j) or c.qual[j] == "rescaled" or c.val[j] <= 0:
+                continue
+            if lo <= c.val[j] / old_trea <= hi:
+                c.rescale(j, e, "bgn_peg" if abs(e - LOG_PEG) < 1e-9 else "cross_filing")
     for cols in cols_by_filing.values():
         for rows in cols.values():
             t = c.get(rows, "0040")
@@ -419,6 +461,9 @@ def clean_km1_trea_ratio(c: Cleaner, rows: dict) -> None:
     if not trea or not (TREA_MIN <= trea <= TREA_MAX):
         return
     deviating, tested = {}, 0
+    i_lev = rows.get("0210")
+    lev = float(c.val[i_lev]) if i_lev is not None and c.live(i_lev) and c.qual[i_lev] == "ok" else None
+    trea_rescaled = c.qual[rows["0040"]] == "rescaled"
     for code, (lo, hi) in TREA_RANGE.items():
         v = c.get(rows, code)
         if v is None or v <= 0:
@@ -427,10 +472,14 @@ def clean_km1_trea_ratio(c: Cleaner, rows: dict) -> None:
         x = v / trea
         if lo <= x <= hi:
             continue
+        # A public lender can have a tiny TREA. Liquidity amounts that fit the leverage exposure are kept.
+        if code in LIQUIDITY_ROWS and lev and 0.001 <= v / lev <= 20.0:
+            continue
         deviating[code] = [e for e in (3, 6, -3, -6) if lo <= x * 10.0 ** e <= hi]
     if not deviating:
         return
-    if tested >= 3 and len(deviating) == tested:
+    # TREA that a cross-filing test already rescaled is not rescaled again.
+    if tested >= 3 and len(deviating) == tested and not trea_rescaled:
         common = set.intersection(*[set(f) for f in deviating.values()])
         if len(common) == 1:
             e = -next(iter(common))
@@ -471,18 +520,25 @@ def clean_km1_filing(c: Cleaner, cols: dict) -> None:
                 c.quarantine(i, "filing_spread", f"value is 10^{lg:.1f} of the median of the other columns")
 
 
-def clean_ov1(c: Cleaner, cols: dict, km1_trea: dict) -> None:
-    """OV1: zero total, and a sub-table that disagrees with KM1 TREA by 10^3 or 10^6.
+def clean_ov1(c: Cleaner, cols: dict, km1_trea: dict, km1_any: dict | None = None) -> None:
+    """OV1: zero total, inconsistent sub-table, and a sub-table that disagrees with KM1 TREA by 10^3, 10^6, or the BGN peg.
 
     The Hub can put a unit slip in one sub-table (.a or .c) only, so each sub-table is tested alone.
     A sub-table with a total is tested with the total. The main table .a without a total is tested
-    with its largest RWEA amount (credit risk, 10% to 130% of TREA).
+    with its largest RWEA amount (credit risk, 10% to 130% of TREA). TREA comes from the KM1 of the
+    same filing, or from the KM1 of any filing for the same period (a quarantined KM1 does not block the test).
     """
+    km1_any = km1_any or {}
     for (ent, ref, per), rows in cols.items():
-        trea = km1_trea.get((ent, ref, per))
+        trea = km1_trea.get((ent, ref, per)) or km1_any.get((ent, per))
         for table in ("K_60.00.a", "K_60.00.c"):
             cells = [(rc, mc, i) for (rc, tb, mc), i in rows.items() if tb == table and c.live(i)]
             if not cells:
+                continue
+            by_row = {rc: i for rc, mc, i in cells if mc == 10}
+            if "0010" in by_row and "0020" in by_row and c.val[by_row["0010"]] > 0                     and c.val[by_row["0020"]] > 1.01 * c.val[by_row["0010"]]:
+                for rc, mc, i in cells:
+                    c.quarantine(i, "ov1_inconsistent", "standardised approach is above credit risk")
                 continue
             tot = [i for rc, mc, i in cells if rc == "0380" and mc == 10]
             credit = [c.val[i] for rc, mc, i in cells if rc == "0010" and mc == 10]
@@ -494,11 +550,11 @@ def clean_ov1(c: Cleaner, cols: dict, km1_trea: dict) -> None:
             amounts = [i for rc, mc, i in cells]
             if tot and trea:
                 t = max(c.val[i] for i in tot)
-                k = exponent(t / trea, powers=(3, 6)) if t > 0 else None
+                k = scale_exponent(t / trea, powers=(3, 6)) if t > 0 else None
                 if k is not None:
                     for i in amounts:
                         if c.live(i):
-                            c.rescale(i, -k, "ov1_vs_km1")
+                            c.rescale(i, -k, "bgn_peg" if abs(abs(k) - LOG_PEG) < 1e-9 else "ov1_vs_km1")
             elif tot:
                 t = max(c.val[i] for i in tot)
                 if 0 < t < TREA_MIN:
@@ -514,6 +570,12 @@ def clean_ov1(c: Cleaner, cols: dict, km1_trea: dict) -> None:
                         for i in amounts:
                             if c.live(i):
                                 c.rescale(i, math.log10(fits[0]), "ov1_vs_km1")
+            # After the repair, credit risk must still be a sensible share of TREA.
+            live = [(rc, i) for rc, mc, i in cells if c.live(i)]
+            cr = [c.val[i] for rc, i in live if rc == "0010"]
+            if trea and cr and 0 < max(cr) / trea < 0.01:
+                for rc, i in live:
+                    c.quarantine(i, "ov1_inconsistent", f"credit risk is {max(cr) / trea:.4f} of TREA after the tests")
 
 
 def load(conn: sqlite3.Connection, template: str) -> pd.DataFrame:
@@ -556,13 +618,20 @@ def run(conn: sqlite3.Connection):
             if t:
                 km1_trea[(ent, ref, ck.df.at[rows["0040"], "period_end"])] = t
 
+    km1_any = {}
+    for (ent, ref), cols in cols_by_filing.items():
+        for rows in cols.values():
+            t = ck.get(rows, "0040")
+            if t:
+                km1_any[(ent, ck.df.at[rows["0040"], "period_end"])] = t
+
     ov = load(conn, OV1)
     co = Cleaner(ov)
     ov_cols: dict = defaultdict(dict)
     for i, r in enumerate(co.df[["entity_key", "reference_date", "period_end", "row_code", "table_code",
                                  "measure_col"]].itertuples(index=False)):
         ov_cols[(r.entity_key, r.reference_date, r.period_end)][(r.row_code, r.table_code, r.measure_col)] = i
-    clean_ov1(co, ov_cols, km1_trea)
+    clean_ov1(co, ov_cols, km1_trea, km1_any)
     return ck, co
 
 
@@ -584,6 +653,47 @@ def assemble(ck: Cleaner, co: Cleaner) -> tuple[pd.DataFrame, pd.DataFrame]:
         "reference_date", "entity_key", "template_code", "period_offset", "row_code", "table_code",
         "check_name", "action", "factor", "detail"])
     return clean, flags
+
+
+def filing_units(ck: Cleaner, co: Cleaner) -> pd.DataFrame:
+    """The unit factor of each KM1 and OV1 filing (the TREA cell of column T, the credit risk cell of OV1).
+
+    The generic engine uses this table as the authority for the unit of a filing.
+    factor is NaN if the cell was removed. The table has one row for each entity, filing, and template.
+    """
+    rows = []
+    d = ck.df
+    sel = np.where((d["row_code"] == "0040").to_numpy() & (d["period_offset"] == 0).to_numpy() & (d["measure_col"] == 10).to_numpy())[0]
+    for i in sel:
+        rows.append((d.at[i, "entity_key"], d.at[i, "reference_date"], KM1,
+                     np.nan if ck.qual[i] == "quarantined" else float(ck.fac[i]), ck.qual[i]))
+    o = co.df
+    sel = np.where((o["row_code"] == "0010").to_numpy() & (o["measure_col"] == 10).to_numpy()
+                   & (o["table_code"] == "K_60.00.a").to_numpy())[0]
+    for i in sel:
+        rows.append((o.at[i, "entity_key"], o.at[i, "reference_date"], OV1,
+                     np.nan if co.qual[i] == "quarantined" else float(co.fac[i]), co.qual[i]))
+    return pd.DataFrame(rows, columns=["entity_key", "reference_date", "template_code", "factor", "quality"]).drop_duplicates(
+        ["entity_key", "reference_date", "template_code"])
+
+
+def cell_units(ck: Cleaner, co: Cleaner) -> pd.DataFrame:
+    """The unit factor of each live KM1 amount cell and each live OV1 cell (raw value and factor).
+
+    The generic engine matches identical raw figures of other templates against these cells. A figure
+    that is identical to a KM1 or OV1 cell has the unit of that cell, not of the filing.
+    """
+    parts = []
+    amount_rows = set(AMOUNT.values())
+    for cl, tpl in ((ck, KM1), (co, OV1)):
+        d = cl.df
+        sel = (cl.qual != "quarantined") & np.isfinite(cl.raw) & (np.abs(cl.raw) >= 2000)
+        if tpl == KM1:
+            sel &= d["row_code"].isin(amount_rows).to_numpy()
+        parts.append(pd.DataFrame({
+            "entity_key": d["entity_key"][sel].to_numpy(), "reference_date": d["reference_date"][sel].to_numpy(),
+            "template_code": tpl, "veur": np.abs(cl.raw[sel]), "lf": np.round(np.log10(cl.fac[sel]), 3)}))
+    return pd.concat(parts, ignore_index=True).drop_duplicates()
 
 
 def population_report(km: pd.DataFrame) -> None:
@@ -625,6 +735,8 @@ def main() -> int:
     with conn:
         clean.to_sql("clean_period_fact", conn, if_exists="replace", index=False)
         flags.to_sql("dq_flag", conn, if_exists="replace", index=False)
+        filing_units(ck, co).to_sql("clean_filing_unit", conn, if_exists="replace", index=False)
+        cell_units(ck, co).to_sql("clean_cell_unit", conn, if_exists="replace", index=False)
         conn.execute("CREATE INDEX idx_clean_lookup ON clean_period_fact(template_code, entity_key, period_end)")
     conn.close()
     return 0

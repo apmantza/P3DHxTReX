@@ -146,9 +146,9 @@ FROM (
     JOIN entity e ON e.entity_id = f.entity_id
     JOIN period_template pt ON pt.template_code = f.template_code
     WHERE (f.column_label GLOB '[a-z]. T' OR f.column_label GLOB '[a-z]. T-[0-9]*')
-      AND SUBSTR(f.reference_date, 6, 2) IN ('03', '06', '09', '12')
 ) q
-WHERE q.period_offset <= q.max_offset;
+WHERE q.period_offset <= q.max_offset
+  AND (q.period_offset = 0 OR SUBSTR(q.reference_date, 6, 2) IN ('03', '06', '09', '12'));
 
 DROP VIEW IF EXISTS v_latest_period_fact;
 CREATE VIEW v_latest_period_fact AS
@@ -327,9 +327,10 @@ def main() -> int:
         "SELECT COUNT(*) FROM v_period_fact WHERE template_code = 'K_60.00' AND period_offset > 0"
     ).fetchone()[0]
     off_grid = conn.execute(
-        "SELECT COUNT(*) FROM v_period_fact WHERE SUBSTR(reference_date, 6, 2) NOT IN ('03', '06', '09', '12')"
+        "SELECT COUNT(*) FROM v_period_fact WHERE period_offset > 0 "
+        "AND SUBSTR(reference_date, 6, 2) NOT IN ('03', '06', '09', '12')"
     ).fetchone()[0]
-    for label, n in (("OV1 T-n rows in v_period_fact", ov1_prior), ("off-quarter rows in v_period_fact", off_grid)):
+    for label, n in (("OV1 T-n rows in v_period_fact", ov1_prior), ("T-n rows of an off-quarter filing in v_period_fact", off_grid)):
         if n:
             print(f"  ASSERTION FAILED: {n} {label}", file=sys.stderr)
     dup_groups += ov1_prior + off_grid

@@ -46,6 +46,7 @@ TEMPLATES = ("K_68.00", "K_20.01", "K_20.02", "K_20.03")
 FACTORS = (1e3, 1e6, 1e-3, 1e-6)
 ABS_ASSETS = (1e7, 5e12)
 IRR_PRIMARY, IRR_WIDE = (0.005, 0.5), (0.0005, 2.0)
+IRR_REPAIR_MAX = 0.3  # a repaired EVE change above 30% of Tier 1 is not believed
 
 VIEW = """
 DROP VIEW IF EXISTS v_clean_fact;
@@ -175,6 +176,14 @@ def clean(df: pd.DataFrame, t1: dict, ta: dict, raw_km1: set):
                 stat = float(s.iloc[0]) if len(s) else None
             bands = ((0.3, 2.5), (0.005, 30.0), (0.3, 2.5)) if anchor_enc else ((0.001, 1.0), (0.0001, 2.0), (0.001, 1.0))
         anchor = anchor_enc or ta.get((key, ref))
+        if tpl == "K_20.03":
+            a_col = g[(g.row_code == "0010") & (g.column_code == "0010")]["value"]
+            b_col = g[(g.row_code == "0010") & (g.column_code == "0030")]["value"]
+            if len(a_col) and len(b_col) and a_col.iloc[0] > 0 and b_col.iloc[0] > 0 \
+                    and not (0.01 <= b_col.iloc[0] / a_col.iloc[0] <= 100):
+                apply(idx, tpl, key, ref, None, "quarantined", "ae3_columns",
+                      f"matching liabilities and encumbered assets differ by {b_col.iloc[0] / a_col.iloc[0]:.0f} times")
+                continue
         f, q, chk, det = decide(stat, anchor, raw_present, *bands)
         apply(idx, tpl, key, ref, f, q, chk, det)
 
@@ -201,6 +210,10 @@ def clean(df: pd.DataFrame, t1: dict, ta: dict, raw_km1: set):
         conv, ratio, info = irrbb_convention(stat, anchor)
         if conv is None:
             apply(idx, tpl, key, ref, None, "quarantined", "irrbb_convention", info)
+            continue
+        if conv in MULT and conv != "eur" and ratio > IRR_REPAIR_MAX:
+            apply(idx, tpl, key, ref, None, "quarantined", "irrbb_ratio_bound",
+                  f"a repair by {conv} gives {ratio:.2f} of Tier 1 (above {IRR_REPAIR_MAX})")
             continue
         if conv in MULT:
             quality = ("ok" if info else "ok_wide") if conv == "eur" else "rescaled"
@@ -291,7 +304,7 @@ CLEAN_NOTES = {
 }
 
 
-def write_status(conn: sqlite3.Connection, clean_df: pd.DataFrame | None = None) -> None:
+def write_status(conn: sqlite3.Connection, clean_df: pd.DataFrame | None = None, doc: Path | None = STATUS_DOC) -> None:
     """Write the template status note from the database (clean_fact and clean_calibration)."""
     tpl = pd.read_sql_query(
         """SELECT template_code, title FROM (SELECT template_code, title, ROW_NUMBER() OVER (
@@ -356,7 +369,8 @@ def write_status(conn: sqlite3.Connection, clean_df: pd.DataFrame | None = None)
     lines += ["", "## All templates", "", "| Template | Title | Status | Note |", "|----------|-------|--------|------|"]
     lines += [f"| {c} | {t} | {s} | {n} |" for c, t, s, n in rows]
     lines += [""]
-    STATUS_DOC.write_text("\n".join(lines), encoding="utf-8")
+    if doc is not None:
+        doc.write_text("\n".join(lines), encoding="utf-8")
 
 
 def main() -> int:
@@ -383,12 +397,17 @@ def main() -> int:
     if args.dry_run:
         return 0
     with conn:
-        out.to_sql("clean_fact", conn, if_exists="replace", index=False)
+        # Only the rows of these templates are replaced. The generic engine owns the other rows.
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'clean_fact'").fetchone():
+            conn.executemany("DELETE FROM clean_fact WHERE template_code = ?", [(t,) for t in TEMPLATES])
+            out.to_sql("clean_fact", conn, if_exists="append", index=False)
+        else:
+            out.to_sql("clean_fact", conn, if_exists="replace", index=False)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_clean_fact ON clean_fact(template_code, entity_key, reference_date)")
         conn.executemany("DELETE FROM dq_flag WHERE template_code = ?", [(t,) for t in TEMPLATES])
         flags.to_sql("dq_flag", conn, if_exists="append", index=False)
         conn.executescript(VIEW)
-    write_status(conn)
+    write_status(conn, doc=STATUS_DOC if args.db.resolve() == DEFAULT_DB.resolve() else None)
     conn.close()
     return 0
 

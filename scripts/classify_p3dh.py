@@ -85,6 +85,7 @@ RATIO_LOW, RATIO_HIGH = 0.3, 3.0
 WIDE_LOW, WIDE_HIGH = 0.05, 30.0
 SIZE_MIN, SIZE_MAX = 1e7, 5e12
 FACTORS = (1e3, 1e6, 1e-3, 1e-6)
+PEG = 1000 / 1.95583  # figure in BGN thousand to EUR
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS dim_country (
@@ -161,11 +162,19 @@ def load_inputs(conn: sqlite3.Connection):
            FROM fact f JOIN entity e ON e.entity_id = f.entity_id
            WHERE f.template_code = 'K_61.00' AND f.row_code = '0210' AND f.column_code = '0010'
              AND f.value IS NOT NULL""", conn)
-    return cand, lev, raw_km1
+    peg = set()
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'dq_flag'").fetchone():
+        peg = set(map(tuple, pd.read_sql_query(
+            "SELECT DISTINCT entity_key, reference_date FROM dq_flag WHERE check_name = 'bgn_peg'", conn).values))
+    return cand, lev, raw_km1, peg
 
 
-def test_assets(value: float, anchor: float | None, raw_km1_present: bool):
+def test_assets(value: float, anchor: float | None, raw_km1_present: bool, peg: bool = False):
     """Return (value, method) for one total-assets candidate."""
+    if peg and anchor is not None:
+        r = value * PEG / anchor
+        if RATIO_LOW <= r <= RATIO_HIGH or WIDE_LOW <= r <= WIDE_HIGH:
+            return value * PEG, "rescaled_bgn_peg"
     if anchor is not None:
         r = value / anchor
         if RATIO_LOW <= r <= RATIO_HIGH:
@@ -183,7 +192,8 @@ def test_assets(value: float, anchor: float | None, raw_km1_present: bool):
     return None, "rejected: implausible size"
 
 
-def build_assets(cand: pd.DataFrame, lev: pd.DataFrame, raw_km1: pd.DataFrame) -> pd.DataFrame:
+def build_assets(cand: pd.DataFrame, lev: pd.DataFrame, raw_km1: pd.DataFrame, peg: set | None = None) -> pd.DataFrame:
+    peg = peg or set()
     lev_map = {(r.entity_key, r.period_end): r.lev for r in lev.itertuples()}
     raw_set = set(zip(raw_km1.entity_key, raw_km1.period_end))
     rows: dict[tuple, dict] = {}
@@ -193,7 +203,7 @@ def build_assets(cand: pd.DataFrame, lev: pd.DataFrame, raw_km1: pd.DataFrame) -
         for r in grp.sort_values("rank").itertuples():
             if not (r.value > 0 and math.isfinite(r.value)):
                 continue
-            val, method = test_assets(r.value, lev_map.get((key, ref)), (key, ref) in raw_set)
+            val, method = test_assets(r.value, lev_map.get((key, ref)), (key, ref) in raw_set, (key, ref) in peg)
             if chosen is None or (chosen["total_assets_eur"] is None and val is not None):
                 chosen = {"total_assets_eur": val, "assets_source": r.template_code, "assets_method": method}
         if chosen is None:
@@ -242,8 +252,8 @@ def main() -> int:
         print("clean_period_fact is missing. Run scripts/clean_p3dh.py first.", file=sys.stderr)
         return 1
     seed_dims(conn, args.reset_dims)
-    cand, lev, raw_km1 = load_inputs(conn)
-    assets = build_assets(cand, lev, raw_km1)
+    cand, lev, raw_km1, peg = load_inputs(conn)
+    assets = build_assets(cand, lev, raw_km1, peg)
     current = build_current(assets)
     if assets.duplicated(["entity_key", "period_end"]).any() or current["entity_key"].duplicated().any():
         raise RuntimeError("duplicate keys in the classification tables")

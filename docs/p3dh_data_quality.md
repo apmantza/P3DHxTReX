@@ -66,7 +66,7 @@ A repair multiplies a cell by a power of 10. The script repairs a cell only when
 
 1. A ratio must agree with the ratio that the same column gives (capital divided by TREA, Tier 1 divided by leverage exposure, ASF divided by RSF, HQLA divided by net outflows).
 2. An amount must have a plausible size against TREA of the same column. For example, HQLA divided by TREA must be between 0.3% and 800%. Exactly one factor (1,000 or 1,000,000) must bring a wrong amount into the range. If all amounts of a column are wrong by the same factor, the script rescales TREA.
-3. TREA must agree with the same quarter in other filings. A factor of 1,000 or 1,000,000 shows a column in the wrong unit (a tolerance of 8% allows for the FX effect).
+3. TREA must agree with the same quarter in other filings. A factor of 1,000 or 1,000,000 shows a column in the wrong unit (a tolerance of 8% allows for the FX effect). A column without TREA uses leverage exposure, CET1, total capital, or Tier 1 as the anchor, in this order. The vote of one column then applies to the other columns of the same filing, including a column T that no other filing covers.
 4. A cell that is off by 1,000 or 1,000,000 against at least 3 other columns of its filing, which agree with each other, is repaired.
 5. A KM1 column T-k is dated by an overlap test. The three capital ratios of the column must match column T of the same bank in the filing k quarters earlier. If they match the filing at another lag, the column gets that period. If the match is unclear, or two columns of one filing get the same period, the script removes the cells.
 
@@ -96,19 +96,39 @@ Use the clean layer for panels and cross-bank statistics.
 
 `scripts/clean_engine.py` cleans every template that has amounts and that is not handled by `clean_p3dh.py` or `clean_templates.py`. It uses no rule for a single template. It finds the rule in the data at each run.
 
-1. **Cell type.** A cell is an amount, a ratio, or other. An amount has a median above EUR 100,000. A ratio has 90% of its values at or below 1.5.
-2. **Size of a filing.** For each bank and filing, the size is the 90th percentile of the non-zero amounts of the template.
-3. **Anchor.** The size is compared with a clean quantity of the same bank and period: total assets, leverage exposure, TREA, Tier 1, CET1, the OV1 RWEA of one risk type, or the cleaned size of another template. The engine tests every anchor.
-4. **Mode.** The log10 of size divided by anchor has one main mode for filings in EUR. Filings in thousand or million sit 3 or 6 units away. A template is clean (auto) when at least 70% of its filings are within 0.75 of the mode and the spread is at most 0.35.
-5. **Cluster vote.** The filings of one bank whose sizes agree form a cluster with one unit. All anchors of the cluster vote. A tight anchor has weight 2 and a loose anchor weight 1. No unit error is the default. A shift needs a weight of at least 3 and 1.5 times the weight of no shift. Votes that conflict remove the cluster.
-6. **Ratio cells.** A filing that reports fractions as percentages is converted when most ratio cells are above 1.5 and all are at most 150. Other ratio cells above 1.5 get the quality `suspect`.
-7. **Zero placeholders.** A filing with only zero amounts is removed when fewer than 10% of the filings of the template are all zero.
+An audit on 2026-10-13 tested the first version. About 14% of its repairs were wrong. The cause was that several anchors measure the size of the bank, so they vote as one, and that a real small value looks like a unit error. The engine now has four stages.
 
-A filing with no usable anchor is removed if its own KM1 failed the scale test (`scale_unresolved`). Otherwise it is kept as `unverified`.
+**Stage A. A candidate for each template.**
 
-Quality values in `clean_fact`: `ok`, `ok_wide` (ratio to the anchor outside the usual range), `ok_history` (confirmed by the other filings of the bank), `rescaled`, `converted`, `suspect`, `unverified`, `untested` (not an amount), and `quarantined` (value removed).
+1. A cell is an amount, a ratio, or other. A label with a non-monetary word (tonnes, CO2, number of, years) is never an amount. Financed emissions (K_41.00 columns 0090 and 0100) are excluded.
+2. The size of a filing is the 90th percentile of its non-zero amounts (the median for 2 or 3 cells). A filing with one amount cell has no size.
+3. The size is compared with a clean quantity of the same bank and period: total assets, leverage exposure, TREA, Tier 1, CET1, OV1 RWEA by risk type, or the size of an earlier template. Each anchor has a main mode of log10(size / anchor). Filings 3 or 6 units away are unit-shifted. No other factor is allowed.
+4. The filings of one bank with sizes that agree form a cluster with one unit. Each anchor votes once for the cluster. A tight base anchor has weight 2. A position between two modes is a vote for no shift. No unit error is the default. A shift needs a weight of at least 3, one tight base anchor, 1.5 times the weight of no shift, and a tight weight that is not below the tight weight of no shift.
+5. Chain anchors (the size of another template) come only from unshifted filings. They are added at the end of a round, so the result does not depend on the order of the templates.
 
-Templates that stay out of `clean_fact` have no tight anchor, too few filings, or no amounts. `docs/p3dh_template_status.md` lists each template with its reason.
+**Stage B. One filing at a time, across templates.**
+
+6. A figure that is identical to a KM1 or OV1 cell of the same filing has the unit of that cell. Table `clean_cell_unit` holds the unit of each KM1 and OV1 cell. Figures of EUR 1 million or more match to the EUR. If the figures of one template match cells of different units, the template is removed.
+7. Templates that share at least 3 figures (2 figures above EUR 100,000, or 1 figure above EUR 1 million) have one unit. The unit with at least twice the weight wins. A conflict removes the group.
+8. A shift of a template with no identity partner stands only if the KM1 unit of the filing agrees (it then takes the exact KM1 factor, for example the Bulgarian lev peg) or at least 3 other templates of the filing have the same shift. Otherwise the filing is removed.
+
+**Stage C. Bounds.** A shifted filing, or a filing that an identity rescued, with a maximum above 3 times total assets (or leverage exposure) is not shifted. A cell above 1,000 times total assets is reverted to its raw value or removed.
+
+**Stage D. Neighbouring filings.** The same cells (row, column, key, sheet) in the filings of one bank must be of one size. A filing that jumps by 1,000 or more against agreeing neighbours is rescaled to match them, when a factor of 1,000 or 1,000,000 fits within 0.75 decades. Otherwise it is removed. Two filings that disagree: the one farther from the size of the bank is odd, or both are removed.
+
+Other rules:
+
+- A filing of ratio cells in percentage points is found by the median of its cells against the population median of the same cells.
+- An all-zero filing is removed only if the same bank has amounts for the template in another filing.
+- A filing without an anchor is removed only if its own KM1 was removed (`scale_unresolved`). Otherwise it stays `unverified`.
+
+Quality values in `clean_fact`: `ok`, `ok_wide` (ratio to the anchor outside the usual range), `ok_history`, `ok_tie` (identical figures decide), `rescaled`, `rescaled_tie`, `rescaled_nb` (neighbouring filings decide), `cell_reverted`, `converted`, `suspect`, `unverified`, `untested` (not an amount), and `quarantined` (value removed).
+
+Limits that the engine cannot solve:
+
+- A template with cells of two units in one filing (for example Zagrebacka banka K_71.00, APS Bank K_66.02). The engine removes the filing when neighbours show the jump, or leaves it when no neighbour exists.
+- A bank that files in thousand or million in every filing and in every template (La Banque Postale, DLR Kredit). KM1 is removed (`suspect_scale`), so all templates of these filings are `scale_unresolved`. An external value of total assets (Bloomberg `BS_TOT_ASSET`) can set the unit.
+- A single weak vote with no partner (NLB K_03.00). The filing is removed, although the raw values are probably right.
 
 ## New data
 
@@ -118,11 +138,12 @@ Rule: test every new filing again. Do not assume that a bank repeats its unit.
 - The Hub changes layouts. The sub-table letters of OV1 changed from 31/03/2026.
 - `scripts/refresh_p3dh.py` runs all steps for all data at each refresh. The steps are idempotent.
 - The engine fails closed. A filing that cannot be tested, or that two tests judge differently, has its amounts removed (`quarantined`). It is not passed.
-- History has two uses only. It confirms a shift (the other filings of the bank must support it). It also reports drift: the table `clean_run_log` keeps the mode, the share, and the removals of each template for each run, and the engine prints the templates that changed since the last run.
-- `scripts/verify_clean.py` runs after each refresh. It tests three things without the rules of the engine: (1) the sizes of neighbouring filings of one bank, (2) the arithmetic (value = raw value times factor), and (3) a list of known cases. Each new filing adds pairs to test 1. When a new unit pattern is fixed, add a known case to `CASES`.
+- A new filing is tested against the history of the bank (stage D). The history confirms or contradicts. It never sets the unit by copying. In a test on a copy, copying the unit of the previous filing was wrong for every injected error, because a new unit error is not the unit of the old filing.
+- A refresh can change the decision for old filings, because the calibration of a template uses all filings. The table `clean_release_diff` lists every filing whose state changed since the last run. Review it before you use the new numbers. The engine prints the number of changes and the templates whose calibration moved (`clean_run_log`).
+- `scripts/verify_clean.py` runs after each refresh. It tests: (1) the same cells in neighbouring filings, (2) the arithmetic (value = raw value times factor), (3) a list of known cases, (4) identity: identical figures in two templates have one unit, (5) the bound of 3 times total assets, and (6) 15 fixtures from the audit.
+- `scripts/injection_test.py` multiplies the newest filing of 40 banks by 0.001 in a copy of the database, runs the clean steps, and counts the injected filings that stay silent. Run it after each change of the rules. It needs about 25 minutes and 4 GB.
+  Result of 2026-10-13: of 659 injected filings of the generic engine, 533 were repaired, 121 were removed, and 5 stayed silent (0.8%; all of Kommunalbanken, a public lender with no TREA). Of 39 injected KM1 filings, 38 were repaired and 1 was removed (0% silent). The limits are 5% silent and 80% handled. A first run found 2 silent KM1 filings of banks that file no TREA in the new column. The anchor rule of rule 3 closed this gap.
 - Review the removed filings after each refresh: `SELECT * FROM dq_flag WHERE action = 'quarantine'`.
-
-Open item: banks that file in million or thousand in every filing and every template have no clean anchor (`scale_unresolved`). An external value of total assets (for example Bloomberg `BS_TOT_ASSET`) can set the unit for each of these banks.
 
 ## Coverage by date
 
@@ -139,4 +160,6 @@ Open item: banks that file in million or thousand in every filing and every temp
 - Cells that are not amounts (ratios, counts) get only the percent test. Counts that carry the FX rate (CCR1 alpha, OR1 counts) are not repaired.
 - Open tables have a blank key for one member of each cell group. The engine tests the size of the whole filing and does not repair single rows.
 - K_83.01 is not downloaded. The server times out.
+- The ratio cells of KM2 (K_90.01) are in fractions for some banks and in percentage points for others. They have the quality `untested`. The M&A model tests the unit of each filing with own funds divided by TREA.
+- K_67.01 (CCyB1, exposures by country) is an open table. It has no clean layer, so the M&A model has no country split of exposures.
 - NBG and Alpha Bank use different profit-recognition bases for CET1 in some quarters. Both values are valid.
