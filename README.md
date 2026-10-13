@@ -158,7 +158,15 @@ dashboard/.venv/Scripts/python -m streamlit run dashboard/Overview.py --server.p
 
 On Windows, double-click `dashboard/run_dashboard.bat`. Then open `http://localhost:8765`.
 
-Pages: Overview, Peer explorer (KM1 by size and geography), Greek banks (against a cohort median), IRRBB, Encumbrance, Entity browser, Data quality (includes the template status note). The pages read the clean layer. After `scripts/refresh_p3dh.py` the pages show the new data without a restart.
+Pages: Overview, Peer explorer (KM1 by size and geography), Greek banks (against a cohort median), IRRBB, Encumbrance, Entity browser, Data quality (includes the template status note), M&A scenario. The pages read the clean layer. After `scripts/refresh_p3dh.py` the pages show the new data without a restart.
+
+### M&A scenario
+
+The page `M&A scenario` combines NBG (or any other bank) with any target bank in P3DH. It uses only P3DH data. You enter the price, the payment mix, new funding, and costs. The page shows pro-forma capital, distance to MDA, leverage, LCR, NSFR, MREL, IRRBB, encumbrance, size class, and the position among all banks. It also shows sensitivity grids and the largest cash payment that keeps a CET1 floor. `docs/ma_model.md` gives the formulas and the limits. Test it with:
+
+```bash
+.venv/Scripts/python scripts/test_ma_model.py
+```
 
 ## Rules
 
