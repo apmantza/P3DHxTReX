@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS bbg_entity (
     statutory_tax_rate REAL, effective_tax_rate REAL, rating_sp TEXT, rating_moodys TEXT, rating_fitch TEXT, latest_period_end TEXT,
     total_assets REAL, net_income REAL, operating_expenses REAL, common_equity REAL, customer_deposits REAL, total_loans REAL, rwa REAL, revenue REAL,
     roe REAL, roa REAL, tier1_ratio REAL, interest_income REAL, cash REAL,
-    market_basis TEXT, market_ticker TEXT, net_income_ltm REAL);  -- net_income, revenue, operating_expenses, common_equity: last fiscal year, EUR million. net_income_ltm: last 12 months.
+    market_basis TEXT, market_ticker TEXT, net_income_ltm REAL, net_income_cont_ltm REAL);  -- net_income, revenue, operating_expenses, common_equity: last fiscal year, EUR million. net_income_ltm: last 12 months. net_income_cont_ltm: last 12 months from continuing operations (net_income_ltm less discontinued operations).
 
 CREATE TABLE IF NOT EXISTS bbg_holder (
     ticker TEXT, pull_date TEXT, rank INTEGER, holder TEXT, holder_type TEXT, country TEXT, pct_out REAL, shares REAL, change REAL, filing_date TEXT, source TEXT,
@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS bbg_bond (
     security TEXT PRIMARY KEY, pulled_at TEXT, lei TEXT, isin TEXT, issuer_lei TEXT, designation TEXT, name TEXT, coupon REAL, coupon_type TEXT, maturity TEXT, issue_date TEXT,
     amt_issued REAL, amt_outstanding REAL, currency TEXT, collateral_type TEXT, payment_rank TEXT, security_type TEXT, callable TEXT, next_call TEXT,
     first_call TEXT, maturity_type TEXT, basel_iii TEXT, contingent TEXT, perpetual TEXT, rating_sp TEXT, rating_moodys TEXT, rating_fitch TEXT,
-    px_last REAL, yield_mid REAL, z_spread REAL, oas REAL, duration REAL, bb_global TEXT);
+    px_last REAL, yield_mid REAL, z_spread REAL, oas REAL, duration REAL, bb_global TEXT, series TEXT);  -- series: the programme of the bond, for example EMTN
 
 CREATE TABLE IF NOT EXISTS bbg_bond_market (
     security TEXT, pull_date TEXT, quote_date TEXT, px_bid REAL, px_ask REAL, px_mid REAL, px_last REAL, ytm_bid REAL, ytm_mid REAL, ytm_ask REAL, ytc_mid REAL, ytw REAL,
@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS bbg_bond_history (
 
 DROP VIEW IF EXISTS v_bond_outstanding;
 CREATE VIEW v_bond_outstanding AS
-    SELECT (SELECT MAX(entity_name) FROM entity WHERE lei = b.lei) AS bank, b.lei, b.security, b.isin, b.designation, b.payment_rank, b.basel_iii, b.coupon, b.coupon_type, b.maturity,
+    SELECT (SELECT MAX(entity_name) FROM entity WHERE lei = b.lei) AS bank, b.lei, b.security, b.isin, b.designation, b.payment_rank, b.security_type, b.series, b.basel_iii, b.coupon, b.coupon_type, b.maturity,
            b.next_call, b.currency, b.amt_issued, b.amt_outstanding,
            CASE WHEN b.currency = 'EUR' THEN b.amt_outstanding
                 WHEN b.currency = 'ATS' THEN b.amt_outstanding / 13.7603  -- fixed conversion rate of the Austrian schilling
@@ -121,12 +121,12 @@ DROP VIEW IF EXISTS v_bank_market;
 CREATE VIEW v_bank_market AS
     SELECT e.entity_key, e.entity_name, e.country, b.lei, b.found, b.private_flag, b.market_basis, b.market_ticker, b.equity_ticker, b.parent_ticker, b.parent_name,
            b.n_bond_issues, b.bond_amt_outstanding, b.statutory_tax_rate, b.effective_tax_rate, b.rating_sp, b.rating_moodys,
-           b.bbg_lei, b.match_method, b.total_assets, b.net_income, b.net_income_ltm, b.operating_expenses, b.common_equity, b.rwa, b.revenue, b.roe, b.latest_period_end
+           b.bbg_lei, b.match_method, b.total_assets, b.net_income, b.net_income_ltm, b.net_income_cont_ltm, b.operating_expenses, b.common_equity, b.rwa, b.revenue, b.roe, b.latest_period_end
     FROM entity e LEFT JOIN bbg_entity b ON b.lei = e.lei;
 """
 
 
-ADDED_COLUMNS = {"bbg_entity": [("net_income_ltm", "REAL"), ("bbg_lei", "TEXT"), ("match_method", "TEXT"), ("parent_relationship", "TEXT"), ("business_structure", "TEXT"), ("debt_ticker", "TEXT"), ("cds_ticker", "TEXT")], "bbg_bond_listing": [("status", "TEXT")]}  # status: NULL = not requested, ambiguous, unresolved
+ADDED_COLUMNS = {"bbg_entity": [("net_income_ltm", "REAL"), ("net_income_cont_ltm", "REAL"), ("bbg_lei", "TEXT"), ("match_method", "TEXT"), ("parent_relationship", "TEXT"), ("business_structure", "TEXT"), ("debt_ticker", "TEXT"), ("cds_ticker", "TEXT")], "bbg_bond_listing": [("status", "TEXT")], "bbg_bond": [("series", "TEXT")]}  # status: NULL = not requested, ambiguous, unresolved
 
 
 def create(conn: sqlite3.Connection) -> None:

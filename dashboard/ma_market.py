@@ -7,6 +7,7 @@ A bank with market basis 'self' has its own listed shares. All other banks have 
 from __future__ import annotations
 
 import datetime as dt
+import re
 from typing import Any, Callable
 
 import pandas as pd
@@ -54,7 +55,8 @@ def slot(query: Query, lei: str) -> dict[str, Any]:
     r = e.iloc[0]
     out.update(found=True, name=r["name"], basis=r["market_basis"] or "none", ticker=r["market_ticker"], sector=r["sector"], private=r["private_flag"],
                country=r["country_iso"], parent_name=r["parent_name"], parent_ticker=r["parent_ticker"],
-               ni_fy=_f(r["net_income"]), ni_ltm=_f(r["net_income_ltm"]), revenue=_f(r["revenue"]), opex=_f(r["operating_expenses"]), equity=_f(r["common_equity"]),
+               ni_fy=_f(r["net_income"]), ni_ltm=_f(r.get("net_income_cont_ltm")) if _f(r.get("net_income_cont_ltm")) is not None else _f(r["net_income_ltm"]),
+               ni_ltm_reported=_f(r["net_income_ltm"]), revenue=_f(r["revenue"]), opex=_f(r["operating_expenses"]), equity=_f(r["common_equity"]),
                assets=_f(r["total_assets"]), rwa=_f(r["rwa"]), tax_stat=_f(r["statutory_tax_rate"]), tax_eff=None if _f(r["effective_tax_rate"]) is None else _f(r["effective_tax_rate"]) / 100.0,
                record_end=r["latest_period_end"], rating_sp=r["rating_sp"], rating_moodys=r["rating_moodys"], bonds_n=_f(r["n_bond_issues"]), debt_out=_m(r["bond_amt_outstanding"]),
                pulled_at=r["pulled_at"])
@@ -76,13 +78,39 @@ def slot(query: Query, lei: str) -> dict[str, Any]:
     return out
 
 
+DEPENDENT = {"Subsidiary", "Synthetic Parent", "Related Entities"}  # values of the Bloomberg field COMPANY_TO_PARENT_RELATIONSHIP for a bank that belongs to a group
+SOVEREIGN_OR_DEPOSITARY = re.compile(r"^(republic|principality|kingdom) of |^stichting ", re.I)  # not a corporate parent: a state, or a foundation that holds depositary receipts
+COOPERATIVE_NAME = re.compile(r"\b(coop|cooperative|cooperativa|cooperatif|popolare|populaire|genossenschaft|scpa|caisse regionale|credit agricole|volksbank|raiffeisenverband)\b", re.I)
+
+
+SPECIALIST_SUBGROUPS = {"Finance-Leasing Compan", "Finance-Commercial", "Finance-Invest Bnkr/Brkr", "Invest Mgmnt/Advis Serv", "Special Purpose Banks", "Commercial Serv-Finance", "Mortgage Banks"}  # Bloomberg subgroups
+SPECIALIST_NAMES = re.compile(r"\bbanca sistema\b", re.I)  # banks that Bloomberg classes as commercial banks but that are specialists (Banca Sistema: factoring)
+
+
+def peer_exclusion(name: str, relationship: str | None, parent_name: str | None, subgroup: str | None) -> str | None:
+    """Why a listed bank is not a peer, or None. Subsidiaries, cooperatives, and specialists are left out: the price of a bank that a parent controls, that has certificates and members,
+    or that lends in one niche, is not the price of an independent universal bank.
+    Subsidiary: Bloomberg gives the bank a parent in a group, unless that parent is a state or a depositary foundation (a state-owned bank trades freely; so does ABN AMRO).
+    Cooperative: the Bloomberg subgroup Cooperative Banks, or a cooperative legal form or name.
+    Specialist: a Bloomberg subgroup of leasing, commercial finance, brokerage, investment management, mortgage, or special purpose banks; or a named exception."""
+    if relationship in DEPENDENT and not SOVEREIGN_OR_DEPOSITARY.match(parent_name or ""):
+        return "subsidiary"
+    if subgroup == "Cooperative Banks" or COOPERATIVE_NAME.search(name or ""):
+        return "cooperative"
+    if subgroup in SPECIALIST_SUBGROUPS or SPECIALIST_NAMES.search(name or ""):
+        return "specialist"
+    return None
+
+
 def peers(query: Query, countries: set[str] | None = None) -> dict[str, Any]:
     """Listed banks of P3DH with four numbers each:
     P/TBV and RoTE from per-share values (price / tangible book, trailing EPS / tangible book),
     P/CET1 and RoCET1 from the market cap in EUR, the trailing profit (EPS x shares), and CET1 of the newest KM1 filing in P3DH.
-    Only European banks by default. A bank with a number outside the ranges, or without CET1, is left out."""
+    Only European banks by default. A bank with a number outside the ranges, or without CET1, is left out.
+    Subsidiaries, cooperatives, and specialists are left out too (peer_exclusion). They are listed in "removed" with the reason."""
     countries = EUROPE if countries is None else countries
-    d = query("""SELECT e.lei, e.name, e.country_iso AS country, e.market_ticker AS ticker,
+    d = query("""SELECT e.lei, e.name, e.country_iso AS country, e.market_ticker AS ticker, e.parent_relationship, e.parent_name,
+                        (SELECT value FROM bbg_equity_snapshot s WHERE s.ticker = e.market_ticker AND s.field = 'INDUSTRY_SUBGROUP' ORDER BY pull_date DESC LIMIT 1) AS subgroup,
                         (SELECT value FROM bbg_equity_snapshot s WHERE s.ticker = e.market_ticker AND s.field = 'PX_LAST' ORDER BY pull_date DESC LIMIT 1) AS px,
                         (SELECT value FROM bbg_equity_snapshot s WHERE s.ticker = e.market_ticker AND s.field = 'TANG_BOOK_VAL_PER_SH' ORDER BY pull_date DESC LIMIT 1) AS tbvps,
                         (SELECT value FROM bbg_equity_snapshot s WHERE s.ticker = e.market_ticker AND s.field = 'TRAIL_12M_EPS' ORDER BY pull_date DESC LIMIT 1) AS eps,
@@ -96,7 +124,7 @@ def peers(query: Query, countries: set[str] | None = None) -> dict[str, Any]:
         newest = pd.Timestamp(km1["period_end"].max()) - pd.Timedelta(days=400)
         km1 = km1[pd.to_datetime(km1["period_end"]) >= newest].sort_values("period_end").groupby("entity_key").tail(1)
         cet1 = dict(zip(km1["entity_key"], km1["value"]))
-    rows = []
+    rows, removed = [], []
     for r in d.itertuples():
         px, tb, eps, mcap, c1 = _f(r.px), _f(r.tbvps), _f(r.eps), _f(r.mcap), _f(cet1.get(r.lei))
         if r.country not in countries or r.ccy == "GBp" or None in (px, tb, eps, mcap, c1) or tb <= 0 or px <= 0 or c1 <= 0:
@@ -104,9 +132,15 @@ def peers(query: Query, countries: set[str] | None = None) -> dict[str, Any]:
         ptbv, rote = px / tb, eps / tb
         pcet1, rocet1 = mcap / c1, mcap * eps / px / c1
         if PTBV_RANGE[0] < ptbv < PTBV_RANGE[1] and PTBV_RANGE[0] < pcet1 < PTBV_RANGE[1] and ROTE_RANGE[0] < rote < ROTE_RANGE[1] and ROTE_RANGE[0] < rocet1 < ROTE_RANGE[1]:
-            rows.append({"lei": r.lei, "name": r.name, "country": r.country, "ticker": r.ticker, "ptbv": ptbv, "rote": rote, "pcet1": pcet1, "rocet1": rocet1})
+            why = peer_exclusion(r.name, r.parent_relationship, r.parent_name, r.subgroup)
+            rec = {"lei": r.lei, "name": r.name, "country": r.country, "ticker": r.ticker, "ptbv": ptbv, "rote": rote, "pcet1": pcet1, "rocet1": rocet1}
+            if why:
+                removed.append({**rec, "reason": why, "parent": r.parent_name})
+            else:
+                rows.append(rec)
     rows.sort(key=lambda x: (x["country"], x["name"]))
-    return {"rows": rows, "pull_date": None if d.empty else d["pull_date"].max()}
+    removed.sort(key=lambda x: (x["reason"], x["country"], x["name"]))
+    return {"rows": rows, "removed": removed, "pull_date": None if d.empty else d["pull_date"].max()}
 
 
 def _label(kind: str, end: str) -> str:

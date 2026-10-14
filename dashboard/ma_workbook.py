@@ -52,13 +52,16 @@ FULL_ROW = 60
 MKT_DFR_ROW = 87  # expected average deposit rate of each calendar year, columns B to E (2026E to 2029E)
 PEER_TOP = 10  # first peer row on sheet Peers
 PEER_BLOCK = ["H", "L", "P"]  # first helper column of each target on sheet Peers (4 columns each)
+PEER_COE_BLOCK = ["X", "Z", "AB"]  # first column of each target for the cost of equity of the near peers (2 columns each)
 
 
 def peer_cols(t: int) -> dict[str, str]:
-    """Columns of target t (0 to 2) on sheet Peers: distance and included multiple, on tangible equity (tbv) and on CET1 (cet1)."""
+    """Columns of target t (0 to 2) on sheet Peers: distance and included multiple, on tangible equity (tbv) and on CET1 (cet1),
+    then the cost of equity that the included peers imply (c_tbv, c_cet1)."""
     base = openpyxl.utils.column_index_from_string(PEER_BLOCK[t])
+    cbase = openpyxl.utils.column_index_from_string(PEER_COE_BLOCK[t])
     L = get_column_letter
-    return {"d_tbv": L(base), "m_tbv": L(base + 1), "d_cet1": L(base + 2), "m_cet1": L(base + 3)}
+    return {"d_tbv": L(base), "m_tbv": L(base + 1), "d_cet1": L(base + 2), "m_cet1": L(base + 3), "c_tbv": L(cbase), "c_cet1": L(cbase + 1)}
 
 
 def cons_row(metric: str, k: int) -> int:
@@ -168,7 +171,7 @@ def default_deal(bank: ma_data.BankData, lei: str) -> dict[str, Any]:
 
 
 def default_globals() -> dict[str, Any]:
-    return dict(cet1_target=0.13, mrel_target=0.29, year=2, pe=14.0, integ_pct=0.20, integ_years=5, excess_value=1.0, dividend_waiver=0.8, rwa_nbg=0.0, peers_k=20, peers_basis=3, target_instruments=1.0, sub_req=0.135, sub_assets=100, sub_tem=0.05)
+    return dict(cet1_target=0.13, mrel_target=0.29, year=2, pe=14.0, integ_pct=0.20, integ_years=5, excess_value=1.0, dividend_waiver=0.8, rwa_nbg=0.0, peers_k=20, peers_basis=3, target_instruments=1.0, sub_req=0.135, sub_assets=100, sub_tem=0.05, coe_g=0.02, coe_first=0.10, coe_third=0.0)
 
 
 # ---------------------------------------------------------------------------------------- workbook
@@ -258,7 +261,7 @@ def write_market(ws, market: dict) -> None:
         ("bvps", "Book value per share", lambda s_: s_.get("bvps"), "0.00"), ("tbvps", "Tangible book value per share", lambda s_: s_.get("tbvps"), "0.00"),
         ("ptbv", "P/TBV (price / tangible book value per share)", None, '0.00"x"'), ("eps_ttm", "EPS, last 12 months", lambda s_: s_.get("eps_ttm"), "0.00"),
         ("ni_fy", "Net income, last fiscal year (EUR m)", lambda s_: s_.get("ni_fy"), "#,##0"),
-        ("ni_ltm", "Net income, last 12 months (EUR m)", lambda s_: s_.get("ni_ltm"), "#,##0"),
+        ("ni_ltm", "Net income from continuing operations, last 12 months (EUR m)", lambda s_: s_.get("ni_ltm"), "#,##0"),
         ("ni_base", "Net income without consensus: last 12 months, else last fiscal year (EUR m)", None, "#,##0"),
         ("revenue", "Revenue, last fiscal year (EUR m)", lambda s_: s_.get("revenue"), "#,##0"),
         ("opex", "Operating expenses, last fiscal year (EUR m)", lambda s_: s_.get("opex"), "#,##0"),
@@ -361,7 +364,8 @@ def write_peers(ws, market: dict) -> None:
     ws["A1"] = "Peers for a bank without a market cap. Median multiple of the k listed banks with the closest return. Do not publish this sheet."
     ws["A1"].font = BOLD
     ws["A2"] = ("Listed European banks of P3DH. P/TBV = price / tangible book value per share. RoTE = EPS of the last 12 months / tangible book value per share. "
-                "P/CET1 = market cap in EUR / CET1 of P3DH. RoCET1 = EPS x shares / CET1. A bank outside P/TBV 0.15x to 6x, P/CET1 0.2x to 6x, or a return of -10% to 60% is left out.")
+                "P/CET1 = market cap in EUR / CET1 of P3DH. RoCET1 = EPS x shares / CET1. A bank outside P/TBV 0.15x to 6x, P/CET1 0.2x to 6x, or a return of -10% to 60% is left out. "
+                "Subsidiaries, cooperatives, and specialist lenders are left out too: they are listed under the peers.")
     ws["A3"], ws["B3"] = "Nearest peers used (k), input N17 of Calc", "=Calc!$N$17"
     ws["A4"], ws["A5"], ws["A6"], ws["A7"], ws["A8"] = ("Target", "Return of the target: RoTE (distance to P/TBV peers) and RoCET1 (distance to P/CET1 peers)", "Distance of the k-th nearest peer",
                                                           "Median multiple of the k nearest peers: P/TBV and P/CET1", "Peers counted")
@@ -378,9 +382,16 @@ def write_peers(ws, market: dict) -> None:
         for col in (pc["m_tbv"], pc["m_cet1"]):
             ws[f"{col}7"].number_format = '0.00"x"'
             ws[f"{col}7"].font = BOLD
-        for col, h in zip(pc.values(), ("Distance RoTE", "P/TBV if near", "Distance RoCET1", "P/CET1 if near")):
+        for col, h in zip(pc.values(), ("Distance RoTE", "P/TBV if near", "Distance RoCET1", "P/CET1 if near", "Implied cost of equity, P/TBV peers", "Implied cost of equity, P/CET1 peers")):
             c_ = ws[f"{col}{PEER_TOP - 1}"]
             c_.value, c_.font, c_.fill = h, HEAD_FONT, HEAD
+        ws[f"{pc['c_tbv']}7"] = f"=MEDIAN({rng(pc['c_tbv'])})"
+        ws[f"{pc['c_cet1']}7"] = f"=MEDIAN({rng(pc['c_cet1'])})"
+        for col in (pc["c_tbv"], pc["c_cet1"]):
+            ws[f"{col}7"].number_format = "0.0%"
+            ws[f"{col}7"].font = BOLD
+        ws[f"{pc['c_tbv']}4"] = f"=Calc!{c}6"
+        ws[f"{pc['c_tbv']}4"].font = BOLD
     ws["U3"], ws["U4"], ws["U5"], ws["U6"], ws["U7"] = "Linear fit of P/TBV on RoTE (information only)", "Slope", "Intercept", "R squared", "Number of peers"
     ws["U3"].font = BOLD
     ws["V4"], ws["V5"], ws["V6"], ws["V7"] = f"=SLOPE({rng('D')},{rng('E')})", f"=INTERCEPT({rng('D')},{rng('E')})", f"=RSQ({rng('D')},{rng('E')})", f"=COUNT({rng('D')})"
@@ -401,13 +412,33 @@ def write_peers(ws, market: dict) -> None:
             ws[f"{pc['m_tbv']}{r}"] = f'=IF({pc["d_tbv"]}{r}<={pc["d_tbv"]}$6,$D{r},"")'
             ws[f"{pc['d_cet1']}{r}"] = f"=ABS($G{r}-{pc['d_cet1']}$5)"
             ws[f"{pc['m_cet1']}{r}"] = f'=IF({pc["d_cet1"]}{r}<={pc["d_cet1"]}$6,$F{r},"")'
+            ws[f"{pc['c_tbv']}{r}"] = f'=IF({pc["d_tbv"]}{r}<={pc["d_tbv"]}$6,Calc!$N$23+($E{r}-Calc!$N$23)/$D{r},"")'
+            ws[f"{pc['c_cet1']}{r}"] = f'=IF({pc["d_cet1"]}{r}<={pc["d_cet1"]}$6,Calc!$N$23+($G{r}-Calc!$N$23)/$F{r},"")'
+            for col in (pc["c_tbv"], pc["c_cet1"]):
+                ws[f"{col}{r}"].number_format = "0.0%"
             for col in (pc["d_tbv"], pc["d_cet1"]):
                 ws[f"{col}{r}"].number_format = "0.0%"
             for col in (pc["m_tbv"], pc["m_cet1"]):
                 ws[f"{col}{r}"].number_format = '0.00"x"'
+    out = market["peers"].get("removed") or []
+    r0 = last + 3
+    ws[f"A{r0}"] = ("Left out of the peers: subsidiaries (Bloomberg gives the bank a parent in a group), cooperatives (Bloomberg subgroup, legal form, or name), "
+                    "and specialists (Bloomberg subgroup of leasing, commercial finance, brokerage, investment management, mortgage, or special purpose banks)")
+    ws[f"A{r0}"].font = BOLD
+    for j, h in enumerate(["Bank", "Country", "Ticker", "Reason", "Parent (Bloomberg)", "P/TBV", "RoTE"]):
+        c = ws.cell(row=r0 + 1, column=1 + j, value=h)
+        c.font, c.fill = HEAD_FONT, HEAD
+    for i, p_ in enumerate(out):
+        r = r0 + 2 + i
+        ws[f"A{r}"], ws[f"B{r}"], ws[f"C{r}"], ws[f"D{r}"], ws[f"E{r}"] = p_["name"], p_["country"], p_["ticker"], p_["reason"], p_.get("parent")
+        ws[f"F{r}"], ws[f"G{r}"] = p_["ptbv"], p_["rote"]
+        ws[f"F{r}"].number_format, ws[f"G{r}"].number_format = '0.00"x"', "0.0%"
     ws.column_dimensions["A"].width = 44
-    for j in range(2, 23):
+    for j in range(2, 30):
         ws.column_dimensions[get_column_letter(j)].width = 14
+    ws["X3"] = "Cost of equity that the near peers imply: g + (return - g) / multiple, with g = input N23 of Calc. Row 7: median of the near peers"
+    ws["X3"].font = BOLD
+    ws.column_dimensions["E"].width = 30
     ws.column_dimensions["U"].width = 40
 
 
@@ -472,6 +503,10 @@ def write_calc(ws, b: Builder, banks: list[ma_data.BankData], deals: list[dict],
          "Banks above EUR 100bn of assets that file one report 13.5% to 31% (P3DH KM2 row EU-8). 13.5% is the most frequent value of the banks of EUR 100bn to 250bn"),
         (21, "Assets from which the assumption applies (EUR bn)", g["sub_assets"], "0", "NBG and BIL together have EUR 113bn. NBG alone has EUR 83bn and files 0%"),
         (22, "Floor of the subordination requirement (% of the leverage exposure)", g["sub_tem"], "pct", "Filed requirements are 5.0% to 8.2% of the exposure (KM2 row EU-10)"),
+        (23, "Growth rate for the cost of equity of the peers (g)", g["coe_g"], "pct", "Gordon model: P/TBV = (return - g) / (cost of equity - g). The cost of equity of a peer is g + (return - g) / multiple"),
+        (24, "Cost of equity of the first target (BIL) (0 = that of its peers, no adjustment)", g["coe_first"], "pct",
+         "A judgment: BIL is smaller and unlisted. The peers do not show a size premium. The peer value is scaled by (cost of equity of the peers - g) / (this - g). Rows 224 to 231"),
+        (25, "Cost of equity of the third target (HCOB) (0 = that of its peers, no adjustment)", g["coe_third"], "pct", "Default 0: no adjustment. The second target (Bank of Cyprus) is listed and has no adjustment"),
     ]
     for r, text, v, kind, note in extra:
         put(f"M{r}", text)
@@ -788,8 +823,8 @@ def write_calc(ws, b: Builder, banks: list[ma_data.BankData], deals: list[dict],
         pc = peer_cols(t)
         put(f"{c}163", f"=Peers!{pc['m_tbv']}7", "x", "link")
         put(f"{c}164", f"=Peers!{pc['m_cet1']}7", "x", "link")
-    label(165, "Value on tangible equity (€bn)", True); fill(165, TGT, "={c}163*{c}30", "bn")
-    label(166, "Value on CET1 (€bn)", True); fill(166, TGT, "={c}164*{c}20", "bn")
+    label(165, "Value on tangible equity (€bn), after the cost of equity factor of row 228", True); fill(165, TGT, "={c}163*{c}30*{c}228", "bn")
+    label(166, "Value on CET1 (€bn), after the cost of equity factor of row 229", True); fill(166, TGT, "={c}164*{c}20*{c}229", "bn")
     label(167, "Peer value used (€bn): basis in N18", True); fill(167, TGT, "=CHOOSE($N$18,{c}165,{c}166,AVERAGE({c}165,{c}166))", "bn")
 
     # ---- issuance needs and requirements weighted by RWAs
@@ -862,6 +897,27 @@ def write_calc(ws, b: Builder, banks: list[ma_data.BankData], deals: list[dict],
     label(221, "To issue: CET1 (CET1 need at the target plus row 218) (€bn)", True); fill(221, BANK_COLS + COMBOS, "={c}193+{c}218", "bn")
     label(222, "Instruments to issue in total (€bn): CET1, AT1, Tier 2, senior non-preferred, senior preferred", True); fill(222, BANK_COLS + COMBOS, "={c}216+{c}217+{c}219+{c}220+{c}221", "bn")
 
+    # ---- cost of equity of a bank without a market cap: the peer multiples are scaled to the cost of equity of the target (Gordon model)
+    label(224, "COST OF EQUITY OF A BANK WITHOUT A MARKET CAP: SCALE OF THE PEER VALUE (new)", True); ws["C224"].font = BOLD
+    fill(224, TGT, "={c}6")
+    label(225, "Cost of equity of the target: N24 (first), N25 (third); 0 = that of its peers", True)
+    put("E225", "=$N$24", "pct", "link")
+    put("G225", "=$N$25", "pct", "link")  # the second target (Bank of Cyprus) is listed: F225 stays empty
+    label(226, "Cost of equity that the near peers imply on tangible equity: g + (RoTE - g) / P/TBV, median", True)
+    label(227, "Cost of equity that the near peers imply on CET1: g + (RoCET1 - g) / P/CET1, median", True)
+    for t, c in enumerate(TGT):
+        pc = peer_cols(t)
+        put(f"{c}226", f"=Peers!{pc['c_tbv']}7", "pct", "link")
+        put(f"{c}227", f"=Peers!{pc['c_cet1']}7", "pct", "link")
+    label(228, "Factor on the value on tangible equity: (cost of equity of the peers - g) / (cost of equity of the target - g); 1 = none", True)
+    fill(228, TGT, "=IF(AND({c}225>$N$23,{c}226>$N$23),({c}226-$N$23)/({c}225-$N$23),1)", "0.000")
+    label(229, "Factor on the value on CET1", True)
+    fill(229, TGT, "=IF(AND({c}225>$N$23,{c}227>$N$23),({c}227-$N$23)/({c}225-$N$23),1)", "0.000")
+    label(230, "Peer value without the adjustment (€bn): basis in N18", True)
+    fill(230, TGT, "=CHOOSE($N$18,{c}163*{c}30,{c}164*{c}20,AVERAGE({c}163*{c}30,{c}164*{c}20))", "bn")
+    label(231, "Effect of the cost of equity of the target on the peer value (€bn)", True)
+    fill(231, TGT, "={c}167-{c}230", "bn")
+
     ws.column_dimensions["A"].width = 2
     ws.column_dimensions["B"].width = 2
     ws.column_dimensions["C"].width = 58
@@ -885,13 +941,14 @@ ROW_KIND.update({154: "bn", 155: "bn", 156: "flag", 157: "pct2", 158: "pct2", 15
                  107: "text", 108: "bn", 109: "bn", 110: "pct2", 111: "pct2", 112: "bp", 113: "bn", 114: "bn", 115: "pct", 116: "bn", 117: "bn", 118: "pct",
                  119: "pct2", 120: "pct2", 121: "bp", 122: "bn", 123: "bn", 124: "bn", 125: "text", 126: "text", 127: "pct", 128: "pct2", 146: "flag", 147: "flag",
                  148: "flag", 149: "flag", 150: "flag", 151: "text", 152: "flag", 129: "text", 161: "pct", 162: "pct", 163: "x", 164: "x", 165: "bn", 166: "bn", 167: "bn",
-                 170: "bn", 171: "pct", 172: "pct", 173: "pct2", 174: "pct2", 175: "pct2", 176: "pct2", 177: "pct2", **{r: "bn" for r in range(178, 200)}, 200: "bp", 201: "bn", 203: "text", **{r: "pct2" for r in range(204, 208)}, **{r: "bn" for r in range(208, 223)}, **{r: "bn" for r in range(131, 137)}, **{r: "pct" for r in range(138, 144)}})
+                 170: "bn", 171: "pct", 172: "pct", 173: "pct2", 174: "pct2", 175: "pct2", 176: "pct2", 177: "pct2", **{r: "bn" for r in range(178, 200)}, 200: "bp", 201: "bn", 203: "text", **{r: "pct2" for r in range(204, 208)}, **{r: "bn" for r in range(208, 223)}, **{r: "bn" for r in range(131, 137)}, **{r: "pct" for r in range(138, 144)},
+                 225: "pct", 226: "pct", 227: "pct", 228: "0.000", 229: "0.000", 230: "bn", 231: "bn"})
 # Cells whose format differs from the rest of the row (an amount of NBG next to ratios of the combinations)
 CELL_KIND = {("D", 29): "bn", ("D", 41): "bn"}
 SECTIONS = [
     ("M&A analysis", 5, 17), ("Equity and market cap", 19, 46), ("Share performance and dilution", 47, 58),
     ("Deal inputs (new)", 60, 70), ("Purchase accounting (new)", 72, 88), ("Regulatory view (new)", 90, 129), ("IRRBB (new)", 130, 143), ("Checks (new)", 145, 152), ("MREL detail (new)", 153, 159),
-    ("Peer valuation (new)", 160, 167), ("Issuance needs (new)", 169, 201), ("Capital buckets and instruments (new)", 203, 222),
+    ("Peer valuation (new)", 160, 167), ("Issuance needs (new)", 169, 201), ("Capital buckets and instruments (new)", 203, 222), ("Cost of equity of the target (new)", 224, 231),
 ]
 
 
@@ -1194,7 +1251,7 @@ REVIEW: list[tuple[str, str, str, str]] = [
     ("G30, G32", "Data", "HCOB tangible equity is 2.7 and the valuation 2.5 (0.926x). P3DH gives 3.71 for tangible equity (CC1) and 2.18 for CET1. The gap of EUR 1.5bn is CET1 deductions in CC1.",
      "Tangible equity from CC1. A bank without a market cap is worth the median multiple of the k listed European banks (P3DH) with the closest return, on tangible equity and on CET1 (rows 160 to 167, sheet Peers). "
      "A linear fit of P/TBV on RoTE gives BIL a higher value than the nearest peers: a few banks with a high return and a high multiple raise the line (sheet Peers shows the fit for information). "
-     "Your 0.926x has no source in the file. For BIL, CET1 is 21% below tangible equity because of other CET1 deductions (EUR 0.45bn), so the CET1 basis gives a lower value."),
+     "Your 0.926x has no source in the file. For BIL, CET1 is 21% below tangible equity because of other CET1 deductions (EUR 0.45bn). Rows 165 and 166 show the value on each basis."),
     ("D7:D30", "Data", "NBG inputs are rounded or older: size 80 (P3DH 83.4), RWAs 41.5 (42.3), CET1 7.2 (7.18), Tier 2 1.1 (1.02), tangible equity 8.3 (8.26).", "P3DH values at 30/06/2026."),
     ("D48, D49", "Data", "Shares 0.9bn and price 17.5. Bloomberg gives the current number of shares and the live price.", "Linked to sheet Market."),
     ("D3", "Assumption checked", "DFR 3% for every year. The ECB deposit rate was 2.00% until 16 June 2026, 2.25% until 15 September, and 2.50% since. The ESTR OIS curve gives the average of each calendar year "
@@ -1218,7 +1275,8 @@ REVIEW: list[tuple[str, str, str, str]] = [
     ("Merger", "Data", "Bloomberg consensus covers NBG for 4 years (few brokers in the last year) and Bank of Cyprus for 3 years. BIL and HCOB have no consensus.",
      "A year without consensus grows from the year before. BIL and HCOB use the net income of the last 12 months and the opex of Bloomberg with the growth inputs of each deal."),
     ("E9:G9, E32:G32, E61:G62", "Data policy", "Profit, valuation, opex, and tax rate of BIL and HCOB were typed numbers without a source in the file.",
-     "Every value comes from P3DH or Bloomberg. The link is the LEI of the bank. Only the deal terms (cash share, stake, premium) are inputs. Row 152 checks that every bank has a profit, an opex, a tax rate, and a valuation."),
+     "Every value comes from P3DH or Bloomberg. The link is the LEI of the bank. Only the deal terms (cash share, stake, premium) are inputs. Row 152 checks that every bank has a profit, an opex, a tax rate, and a valuation. "
+     "The profit is the trailing income from continuing operations of Bloomberg (TRAIL_12M_CONT_INC). The net income of Bloomberg for BIL includes discontinued operations (the sale of a subsidiary), so the model leaves them out. P3DH has no income statement."),
     ("E37:G37", "Lever", "The premium of BIL (-10%) and HCOB (0%) was set against the typed valuation of 0.926x tangible equity.",
      "BIL and HCOB default to 0%. BoC keeps 15% over its market cap. Change the premium in row 37."),
     ("H22:J24, rows 169 to 201", "Method", "The original had no issuance need. Requirements of the combination were not weighted by RWAs, and the shortfall of each layer was not turned into an amount to issue.",
@@ -1230,6 +1288,9 @@ REVIEW: list[tuple[str, str, str, str]] = [
      "I could not check the legal text here. The rule behind 13.5% is probably the one for banks above EUR 100bn: verify it with the resolution authority. Set N20 to 0 to remove the assumption."),
     ("rows 203 to 222", "Method", "The original had no AT1 and Tier 2 buckets.", "The buckets are the Pillar 1 share plus the share of the P2R that CRR Article 104a allows to meet with AT1 (18.75%) and Tier 2 (25%). "
      "The P2R is weighted by RWAs. Rows 212 and 213 show the room that is left, and rows 216 to 222 the instruments to issue, cheapest first: AT1 and Tier 2 within the buckets, then senior non-preferred for the subordination need, then senior preferred."),
+    ("N23 to N25, rows 224 to 231", "Assumption", "The peers do not show a size premium in their cost of equity. BIL is smaller and unlisted, so its cost of equity is probably higher than the cost of equity that its peers imply.",
+     "N24 sets the cost of equity of the first target (default 10%). The peer value is scaled by (cost of equity of the peers - g) / (N24 - g). The cost of equity of a peer is g + (return - g) / multiple, with g = N23 (2%). "
+     "Set N24 to 0 to remove the adjustment. N25 does the same for the third target (default 0: no adjustment). Row 231 shows the effect."),
     ("N19", "Limitation", "The AT1, Tier 2, and eligible liabilities of a target count in the group in full. In practice instruments of a subsidiary count at group level in part (CRR Articles 83 to 88), "
      "and as external MREL only if the subsidiary is a resolution entity. Otherwise they are internal MREL.", "N19 (default 100%). Set it lower to test. P3DH shows no AT1 bond for BIL in Bloomberg, but 300m of AT1 in TLAC1."),
     ("H4, E37", "Lever", "The stake in BIL is 90% because the State of Luxembourg holds 10% and does not sell. Price = stake x valuation x (1 + premium), so a premium of -10% on top of a stake of 90% counts the 10% twice.",

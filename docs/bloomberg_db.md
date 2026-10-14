@@ -68,7 +68,7 @@ The search service (the bond census) needs no unique security.
 | `bbg_rate_series`, `bbg_rate_daily` | 100 daily series from 1999: ECB policy rates, ESTR, Euribor, 17 ESTR OIS tenors, EUR swaps, government yields, credit indices, 19 FX rates, equity indices. | series, date |
 | `bbg_rate_average` | Average of each series for each month (M), quarter (Q), half year (H), year (Y), year to date (YTD), and last 12 months (LTM). `complete` = 1 when the period is over. | series, type, period end |
 | `bbg_expected_dfr` | Expected average deposit rate for each year, seen from each month end since 2020. For the last date also each half year and quarter. | as of, type, period end |
-| `bbg_entity` | One row for each P3DH entity: Bloomberg name, country, parent and the relationship to it, tax rates, ratings, fundamentals of the last fiscal year (EUR million), net income of the last 12 months, number and amount of bonds, tickers, match method, market basis. | P3DH key |
+| `bbg_entity` | One row for each P3DH entity: Bloomberg name, country, parent and the relationship to it, tax rates, ratings, fundamentals of the last fiscal year (EUR million), net income of the last 12 months (`net_income_ltm`) and the part of it from continuing operations (`net_income_cont_ltm`, field `TRAIL_12M_CONT_INC`), number and amount of bonds, tickers, match method, market basis. | P3DH key |
 | `bbg_ticker_map` | Tickers of each bank: `equity`, `proxy_equity`, `parent_equity`, `debt`, `cds`. `priced` = 1 when the stock has a price. | key, kind, ticker |
 | `bbg_debt_maturity` | Debt that matures in each year (EUR million): bonds, and bonds with loans. | key, year |
 | `bbg_equity_snapshot` | 27 fields for each listed ticker on the pull date: price, shares, book value, tangible book value, EPS, ratios, subgroup. | ticker, field, date |
@@ -78,7 +78,7 @@ The search service (the bond census) needs no unique security.
 | `bbg_holder` | The 20 largest holders of each listed ticker: name, type (Government, Sovereign Wealth Fund, Bank, Investment Advisor, ...), country, percent of shares, change, filing date. | ticker, date, rank |
 | `bbg_ownership` | Share of each holder type (named holders, and all holders), the institutional share, and the free float. | ticker, date, kind, type |
 | `bbg_bond_listing` | The live bonds that the census found for each bank, with a status: pending (empty), ok (in the universe), small (outstanding, not above EUR 150m), redeemed, ambiguous, unresolved. | key, security |
-| `bbg_bond` | Static data of a bond (coupon, maturity, size, rank, Basel III designation, call, rating). | security |
+| `bbg_bond` | Static data of a bond (coupon, maturity, size, rank, Basel III designation, call, rating, series). | security |
 | `bbg_bond_market` | Market data of a bond on the pull date: bid, ask, mid, yields (maturity, call, worst), I-spread, Z-spread, G-spread, benchmark spread, asset-swap spread, OAS, duration, quote date. | security, date |
 | `bbg_bond_history` | Daily history of the quoted outstanding bonds: price, bid, ask, yield to maturity, yield to call, I-spread, Z-spread, asset-swap spread. | security, date |
 | `bbg_pull_log` | Each pull: time, kind, detail, number of rows, status. | pull id |
@@ -170,10 +170,16 @@ Static data and market data cost one unique security for each bond.
 
 How the census works (`bonds --all --census-only`):
 1. The Bloomberg name of the bank gives the issuer tickers. Codes of loan facilities (`BL...`, `BF...`) are not tickers. Two P3DH entities with one Bloomberg issuer are listed once.
-2. A search for the ticker returns a part of the bonds. A sweep over the years in which the bank has debt that matures (`bbg_debt_maturity`) and over `FRN`, `PERP`, and `0` adds the rest.
+2. A search for the ticker returns a part of the bonds. A sweep over the years in which the bank has debt that matures (`bbg_debt_maturity`) and over `FRN` and `0` adds the rest.
+   A search finds a perpetual (AT1 and old Tier 1) only when the query holds a coupon. `<ticker> PERP` returns nothing. So a sweep over `<ticker> 0 PERP` to `<ticker> 14 PERP` adds the perpetuals (`PERPETUAL_COUPONS`).
+   Each query returns the perpetuals with a coupon from n to n + 0.99, so a sweep in steps of 1 is complete.
 3. A bond stays if the issuer name matches the bank, the maturity in its name is not in the past, and it is not a CDS contract or a loan.
    The issuer name must match with 75% of the words, counted against all words of both names. Deutsche Bank Luxembourg is not Deutsche Bank AG.
 4. A request converts a fraction coupon to a decimal (`5<7/8>` becomes `5.875`). Bloomberg does not accept the fraction.
+
+The field `SERIES` (column `series` of `bbg_bond`) names the programme of a bond, for example `EMTN`, `GMTN`, or `DMTN`. The spelling differs (`EMTN`, `Emtn`, `emtn`), so compare in upper case.
+A bond that is not issued under a programme has an empty series. Private structured notes of a bank (zero-coupon and index-linked notes) also have an empty series or a number.
+A perpetual AT1 has an empty series: filter the EMTN series for senior and Tier 2 bonds, and add the perpetuals.
 
 The name of a bond shows the maturity but not an early redemption. A called bond has an amount outstanding of 0. 389 of the 1,745 bonds in the last pull were no longer outstanding (status `redeemed`).
 `v_bond_outstanding` shows only bonds with an amount above 0 and a maturity in the future (or a perpetual).
@@ -206,6 +212,7 @@ Limits:
   The search service gives no identifier for them.
 - A bond that Bloomberg cannot find has the status `unresolved` (196 bonds, mostly zero-coupon notes of BIL and NOBA).
 - A search returns at most 1,000 results. A sweep covers the gap, but a bank with thousands of notes is not complete.
+- The perpetual sweep was added on 14 October 2026. The 7 focus banks have their perpetuals. The other banks get them at their next relist (the monthly run, `--relist`), so the count of AT1 bonds of the other banks is low until then.
 - The count of issues in `bbg_entity` (`DDIS`) is the count of the ultimate parent and includes loans. BNP Paribas Fortis, BGL, and BNL show the 11,489 issues of BNP Paribas.
 - Bank of Cyprus Holdings shows 1 outstanding bond. The operating bank issues under another legal entity.
 - The amounts of the bonds in other currencies are converted at the latest FX rate. The Austrian schilling uses its fixed rate.
@@ -217,15 +224,18 @@ It takes the bonds that were outstanding on the TLAC1 date with a residual matur
 
 | Item | P3DH (EUR m) | Bloomberg bonds |
 |---|---|---|
-| AT1 (TLAC1 row 2) | 300.0 | no AT1 bond found |
+| AT1 (TLAC1 row 2) | 300.0 | ties exactly: one perpetual (series empty, Basel III designation Additional Tier 1) |
 | Tier 2 plus the amortised part (rows 6 + EU-12c) | 436.6 | ties within 1% |
 | Senior non-preferred (rows 12 + EU-12b) | 398.2 | ties within 4% |
-| Non-subordinated eligible liabilities (row 14) | 2,550.3 | cannot be decided: the ranks of Bloomberg give a range that is too wide |
+| Non-subordinated eligible liabilities (row 14) | 2,550.3 | does not tie: the senior preferred bonds of the EMTN series give less than one third of the P3DH value |
 
-- Tier 2 and senior non-preferred tie. TLAC1 itself adds up: row 17a (462.0) = rows 12 + EU-12b + EU-12c, and row 14 (2,550.3) = rows 13 + EU-13a.
-- Bloomberg has no AT1 bond of BIL, under the ticker BANQUE or any other that I found. The AT1 of EUR 300m in TLAC1 is not in the bond data. It may be a private placement or sit in another entity. Ask BIL treasury.
-- The non-subordinated layer cannot be tested. Bloomberg labels most BIL notes `Sr Unsecured` (541 notes, of which 252 zero-coupon notes). It gives no flag for structured notes or for the contractual conditions of MREL.
-  The ranks bracket the P3DH value, but they do not give it. One zero-coupon note that matures in 2030 (ISIN LU1397951481, issued in 2016) is large against the P3DH value and is not in the maturity profile of Bloomberg (`bbg_debt_maturity`).
+- AT1, Tier 2, and senior non-preferred tie. TLAC1 itself adds up: row 17a (462.0) = rows 12 + EU-12b + EU-12c, and row 14 (2,550.3) = rows 13 + EU-13a.
+- The AT1 was missing from the first census, because a search finds a perpetual only with a coupon in the query (see the census above).
+- The non-subordinated layer does not tie. All senior preferred bonds of BIL with a residual maturity of at least 1 year are in the EMTN series, so the series filter does not change the total.
+  The rest of the layer is not in the EMTN series. Bloomberg labels most other BIL notes `Sr Unsecured` with an empty series (zero-coupon and index-linked notes). Bloomberg gives no flag for structured notes or for the contractual conditions of MREL.
+  BIL publishes TLAC3a (creditor ranking by residual maturity) in its own Pillar 3 report, not in P3DH. The rank of this layer holds debt instruments and eligible deposits.
+  Beyond 5 years of residual maturity, the layer ties to the EMTN bonds of the database. The gap is in the buckets of 1 to 2 years and 2 to 5 years, and the part of 1 to 2 years is too large for the notes of the database.
+  So the gap is probably not bonds (for example term deposits, registered notes, or loans). Ask BIL treasury for the list of eligible liabilities.
 - 351 BIL names are `ambiguous` and 35 `unresolved`. The tool cannot see them.
 - BIL files no TLAC3 (creditor ranking), which would split the liabilities by rank and maturity.
 - NBG ties on AT1 and on Tier 2 (within 3%). Its non-subordinated value is within 9% of its senior preferred bonds. For Eurobank and Bank of Cyprus the bonds sit in another legal entity (the holding company), so the totals do not tie.

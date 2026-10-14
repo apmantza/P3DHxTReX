@@ -241,6 +241,7 @@ def entity_rows(conn: sqlite3.Connection) -> None:
         ("LEI_NONE_0000000008", 1, "Private Bank", "DE", "0003Z GR", "Private Bank", "0003Z GR", "LEI_NONE_0000000008", 165.0, 248.0, 382.0, 3956.0, 1641.0, 0.30, 42.9),
     ]
     conn.executemany(f"INSERT INTO bbg_entity ({cols}) VALUES ({','.join('?' * 15)})", data)
+    conn.execute("UPDATE bbg_entity SET net_income_cont_ltm = 170.0 WHERE lei = 'LEI_CONGLOM00000004'")  # net income 210 includes a gain on discontinued operations
     conn.execute("INSERT INTO bbg_entity (lei, found, name, equity_ticker, bbg_lei, match_method) VALUES ('FR969500TJ5KRTCJQWXH', 1, 'Listed SA', 'LIST FP', '969500TJ5KRTCJQWXH05', 'lei_rebuilt')")
     conn.execute("INSERT INTO bbg_equity_snapshot VALUES ('LIST FP', 'PX_LAST', '2026-10-13', 10.0)")
     conn.execute("INSERT INTO bbg_equity_snapshot VALUES ('LIST FP', 'INDUSTRY_SUBGROUP', '2026-10-13', 'Commer Banks Non-US')")
@@ -283,6 +284,10 @@ def test_equity_and_market() -> None:
     check("slot: effective tax rate as a fraction, statutory as given", near(s["tax_eff"], 0.25) and near(s["tax_stat"], 0.29))
     u = ma_market.slot(q, "LEI_NONE_0000000008")
     check("slot of a bank without market cap: Bloomberg data of the bank, no price", u["basis"] == "none" and u["ni_ltm"] == 248.0 and u["opex"] == 382.0 and "mcap" not in u)
+    cg = ma_market.slot(q, "LEI_CONGLOM00000004")
+    check("slot: profit of the last 12 months is the income from continuing operations when Bloomberg has it (170 against a net income of 210); the reported value stays available",
+          cg["ni_ltm"] == 170.0 and cg["ni_ltm_reported"] == 210.0, str((cg["ni_ltm"], cg["ni_ltm_reported"])))
+    check("slot: without a continuing value the net income of the last 12 months is used", u["ni_ltm"] == 248.0 and u["ni_ltm_reported"] == 248.0)
     check("slot of an unknown LEI is not found", not ma_market.slot(q, "LEI_UNKNOWN_0000000")["found"])
     check("LEI of an entity: the key when the entity table has no LEI", ma_market.lei_of(lambda *_: pd.DataFrame({"lei": []}), "K1") == "K1")
 
@@ -298,6 +303,33 @@ def test_equity_and_market() -> None:
     conn.execute("UPDATE bbg_entity SET country_iso = 'GR' WHERE lei = 'LEI_SELF_00000000001'")
     conn.execute("UPDATE bbg_equity_snapshot SET value = 80.0 WHERE ticker = 'SELF GA' AND field = 'PX_LAST'")
     check("peers: a P/TBV above 6x is left out", ma_market.peers(q)["rows"] == [])
+    conn.execute("UPDATE bbg_equity_snapshot SET value = 16.0 WHERE ticker = 'SELF GA' AND field = 'PX_LAST'")
+    check("peers: at a normal price the bank is a peer, and nothing is removed", len(ma_market.peers(q)["rows"]) == 1 and ma_market.peers(q)["removed"] == [])
+    conn.execute("UPDATE bbg_entity SET parent_relationship = 'Subsidiary', parent_name = 'Parent Bank AG' WHERE lei = 'LEI_SELF_00000000001'")
+    pr = ma_market.peers(q)
+    check("peers: a subsidiary is left out and listed with the reason", pr["rows"] == [] and [(x["lei"], x["reason"]) for x in pr["removed"]] == [("LEI_SELF_00000000001", "subsidiary")], str(pr["removed"]))
+    conn.execute("UPDATE bbg_entity SET parent_name = 'Republic of Greece' WHERE lei = 'LEI_SELF_00000000001'")
+    check("peers: a bank that a state owns stays a peer", len(ma_market.peers(q)["rows"]) == 1)
+    conn.execute("UPDATE bbg_entity SET parent_relationship = NULL, name = 'Self Cooperative Bank' WHERE lei = 'LEI_SELF_00000000001'")
+    pr = ma_market.peers(q)
+    check("peers: a cooperative is left out and listed with the reason", pr["rows"] == [] and [x["reason"] for x in pr["removed"]] == ["cooperative"], str(pr["removed"]))
+    px = ma_market.peer_exclusion
+    cases = [("Tatra Banka as", "Subsidiary", "Raiffeisen Bank International", None, "subsidiary"), ("Credit Agricole SA", "Subsidiary", "Credit Agricole Group", "Diversified Banking Inst", "subsidiary"),
+             ("Caisse Regionale de Credit Agr", "Synthetic Parent", "Credit Agricole Group", "Regional Banks-Non US", "subsidiary"),
+             ("ABN AMRO Bank NV", "Subsidiary", "Stichting Administratiekantoor", "Commer Banks Non-US", None), ("Bank Ochrony Srodowiska SA", "Subsidiary", "Republic of Poland", None, None),
+             ("Hrvatska Postanska Banka dd", "Govt Owned Entity", "Republic of Croatia", None, None), ("Banca Agricola Popolare di Sic", None, None, "Cooperative Banks", "cooperative"),
+             ("Coop Pank AS", None, None, "Commer Banks Non-US", "cooperative"), ("Banca Valsabbina SCpA", None, None, None, "cooperative"),
+             ("Raiffeisen Bank International", None, None, "Commer Banks Non-US", None), ("Alpha Bank SA", None, "Alpha Bank SA", "Commer Banks Non-US", None),
+             ("GRENKE AG", None, None, "Finance-Leasing Compan", "specialist"), ("Banca IFIS SpA", None, None, "Finance-Commercial", "specialist"),
+             ("flatexDEGIRO SE", None, None, "Finance-Invest Bnkr/Brkr", "specialist"), ("VP Bank AG", None, None, "Invest Mgmnt/Advis Serv", "specialist"),
+             ("Banca Sistema SpA", None, None, "Commer Banks Non-US", "specialist"), ("Leasing Sub AG", "Subsidiary", "Parent AG", "Finance-Leasing Compan", "subsidiary"),
+             ("Bank of Cyprus Holdings PLC", None, "Bank of Cyprus Holdings PLC", "Commer Banks Non-US", None), ("Deutsche Bank AG", None, "Deutsche Bank AG", "Diversified Banking Inst", None)]
+    bad = [c_[0] for c_ in cases if px(*c_[:4]) != c_[4]]
+    check("peer exclusion: subsidiary (a parent in a group, not a state or a depositary foundation), cooperative (subgroup, legal form, name), and specialist (subgroup or named exception)", not bad, str(bad))
+    conn.execute("UPDATE bbg_entity SET name = 'Self Bank' WHERE lei = 'LEI_SELF_00000000001'")
+    conn.execute("UPDATE bbg_equity_snapshot SET value = 'Finance-Leasing Compan' WHERE ticker = 'SELF GA' AND field = 'INDUSTRY_SUBGROUP'")
+    pr = ma_market.peers(q)
+    check("peers: a specialist is left out and listed with the reason", pr["rows"] == [] and [x["reason"] for x in pr["removed"]] == ["specialist"], str(pr["removed"]))
 
 
 def test_rates_reader() -> None:
@@ -338,17 +370,50 @@ class FakeClient:
         return {s: self.data.get(s, {"_error": "unknown"}) for s in securities}
 
 
+class BondClient(FakeClient):
+    """Bloomberg stand-in for a bank with an EMTN bond and a perpetual. The search finds the perpetual only when the query holds a coupon."""
+    def search(self, query, yellow_key="YK_FILTER_CORP", max_results=1000):
+        q = query.upper()
+        if q in ("TEST BANK", "TST"):
+            return [("TST 4 01/01/2030<corp>", "Test Bank")]
+        if q == "TST 7 PERP":
+            return [("TST 7<1/4> PERP REGS<corp>", "Test Bank"), ("TSTX 7 PERP<corp>", "Other Bank")]
+        return []
+
+
+def test_perpetual_and_series() -> None:
+    print("3d2. a perpetual is found by its coupon; the series of a bond is stored")
+    bond = {"ID_ISIN": "XS1", "NAME": "Test Bank", "CPN": 4.0, "MATURITY": "2030-01-01", "ISSUE_DT": "2025-01-01", "AMT_OUTSTANDING": 5e8, "CRNCY": "EUR", "PAYMENT_RANK": "Sr Preferred",
+            "SECURITY_TYP": "EURO MTN", "IS_PERPETUAL": "N", "SERIES": "EMTN"}
+    perp = {"ID_ISIN": "XS2", "NAME": "Test Bank", "CPN": 7.25, "MATURITY": None, "ISSUE_DT": "2025-03-07", "AMT_OUTSTANDING": 3e8, "CRNCY": "EUR", "PAYMENT_RANK": "Jr Subordinated",
+            "SECURITY_TYP": "EURO-ZONE", "IS_PERPETUAL": "Y", "BASEL_III_DESIGNATION": "Additional Tier 1"}
+    client = BondClient({"TST 4 01/01/2030 Corp": bond, "TST 7.25 PERP REGS Corp": perp})
+    listed = dict(bonds.list_bonds(client, "TST", 1, "Test Bank", None))
+    check("list: the perpetual is found with the coupon sweep, and a bond of another issuer is not kept", sorted(listed) == ["TST 4 01/01/2030<corp>", "TST 7<1/4> PERP REGS<corp>"], str(sorted(listed)))
+    conn = new_db()
+    conn.execute("INSERT INTO entity VALUES ('K', 'L1', 'Test Bank', 'Greece')")
+    conn.execute("INSERT INTO bbg_entity (lei, found, name, long_name, n_bond_issues, bond_amt_outstanding, total_assets) VALUES ('L1', 1, 'Test Bank', 'Test Bank', 2, 8e8, 1e10)")
+    res = bonds.pull(client, conn, 0, 100000, ["L1"], False, False, True)
+    row = {r[0]: r[1:] for r in conn.execute("SELECT security, series, perpetual, basel_iii, payment_rank FROM bbg_bond")}
+    check("pull: both bonds are stored; the series of the EMTN bond is EMTN, the perpetual has none and is flagged Y",
+          res["static"] == 2 and row["TST 4 01/01/2030<corp>"][0] == "EMTN" and row["TST 7<1/4> PERP REGS<corp>"][:3] == (None, "Y", "Additional Tier 1"), str(row))
+    uni = sorted(r[0] for r in conn.execute("SELECT security FROM v_bond_universe"))
+    check("the perpetual of EUR 300m is in the universe", "TST 7<1/4> PERP REGS<corp>" in uni, str(uni))
+    check("the view of outstanding bonds shows security type and series", conn.execute("SELECT series, security_type FROM v_bond_outstanding WHERE security = 'TST 4 01/01/2030<corp>'").fetchone() == ("EMTN", "EURO MTN"))
+
+
 def test_entities() -> None:
     print("6. entity pull keeps the market basis")
     conn = new_db()
     conn.execute("INSERT INTO entity VALUES ('K', 'ABCDEFGHIJKLMNOPQR12', 'Test Bank', 'Greece')")
     lei = "ABCDEFGHIJKLMNOPQR12"
-    fake = FakeClient({f"/lei/{lei}": {"NAME": "Test Bank", "COUNTRY_ISO": "GR", "TRAIL_12M_NET_INC": 123.0, "NET_INCOME": 100.0, "DDIS_AMT_OUTSTANDING_BY_YR": [{"Year": 2030, "Amount Outstanding - Ultimate Parent": 500.0}]}})
+    fake = FakeClient({f"/lei/{lei}": {"NAME": "Test Bank", "COUNTRY_ISO": "GR", "TRAIL_12M_NET_INC": 123.0, "TRAIL_12M_CONT_INC": 110.0, "NET_INCOME": 100.0, "DDIS_AMT_OUTSTANDING_BY_YR": [{"Year": 2030, "Amount Outstanding - Ultimate Parent": 500.0}]}})
     entities.pull(fake, conn)
     conn.execute("UPDATE bbg_entity SET market_basis = 'self', market_ticker = 'TST GA' WHERE lei = ?", (lei,))
     entities.pull(fake, conn)
     row = conn.execute("SELECT market_basis, market_ticker, net_income_ltm, net_income FROM bbg_entity WHERE lei = ?", (lei,)).fetchone()
     check("a second pull updates the values and keeps market basis and ticker", row == ("self", "TST GA", 123.0, 100.0), str(row))
+    check("income from continuing operations of the last 12 months is stored next to the net income", conn.execute("SELECT net_income_cont_ltm FROM bbg_entity WHERE lei = ?", (lei,)).fetchone() == (110.0,))
     check("debt maturity profile stored", conn.execute("SELECT bonds_m FROM bbg_debt_maturity WHERE lei = ? AND year = 2030", (lei,)).fetchone() == (500.0,))
     check("a LEI without data is stored as not found", entities.pull(FakeClient({}), conn) == 1 and conn.execute("SELECT found FROM bbg_entity WHERE lei = ?", (lei,)).fetchone() == (0,))
 
@@ -493,6 +558,7 @@ if __name__ == "__main__":
     test_bond_market()
     test_bond_history()
     test_universe()
+    test_perpetual_and_series()
     test_refresh()
     test_equity_and_market()
     test_rates_reader()

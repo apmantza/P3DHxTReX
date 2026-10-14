@@ -38,7 +38,8 @@ def template(conn: sqlite3.Connection, lei: str, code: str) -> tuple[str | None,
 
 
 def bonds_on(conn: sqlite3.Connection, lei: str, ref: str, fx: dict[str, float]) -> pd.DataFrame:
-    b = pd.read_sql_query("SELECT security, payment_rank, basel_iii, maturity, issue_date, currency, amt_outstanding, perpetual, security_type, coupon_type FROM bbg_bond WHERE lei = ?", conn, params=(lei,))
+    b = pd.read_sql_query("SELECT security, payment_rank, basel_iii, maturity, issue_date, currency, amt_outstanding, perpetual, security_type, coupon_type, series FROM bbg_bond WHERE lei = ?", conn, params=(lei,))
+    b["emtn"] = b.series.fillna("").str.upper().eq("EMTN")  # the spelling of the series differs: EMTN, Emtn, emtn
     b["eur_m"] = [(a or 0) / fx.get(c, float("nan")) / 1e6 for a, c in zip(b.amt_outstanding, b.currency)]
     b["perp"] = (b.perpetual == "Y") | b.maturity.isna()
     live = b[(b.eur_m > 0) & (b.issue_date <= ref) & (b.perp | (b.maturity > ref))].copy()
@@ -66,6 +67,7 @@ def report(conn: sqlite3.Connection, lei: str) -> None:
     snp_b = s(ge1[ge1.payment_rank == "Sr Non Preferred"])
     sp_b = s(ge1[ge1.payment_rank == "Sr Preferred"])
     su_b = s(ge1[ge1.payment_rank.isin(["Sr Unsecured", "Unsecured"])])
+    sp_emtn = s(ge1[(ge1.payment_rank == "Sr Preferred") & ge1.emtn])
     g = lambda code: t1.get(code, 0.0)  # noqa: E731
     nonsub = g("0160") or g("0140") + g("0150")  # row 14, or rows 13 and EU-13a when a bank leaves row 14 empty
     rows = [
@@ -73,6 +75,7 @@ def report(conn: sqlite3.Connection, lei: str) -> None:
         ("Tier 2 incl. the amortised part counted as liability", g("0060") + g("0130"), t2_b, "TLAC1 rows 6 + EU-12c / designation 'Tier 2' (all residual maturities)"),
         ("Subordinated eligible liabilities (senior non-preferred)", g("0100") + g("0120"), snp_b, "TLAC1 rows 12 + EU-12b / rank 'Sr Non Preferred', at least 1 year"),
         ("Non-subordinated eligible liabilities, lower bound", nonsub, sp_b, "TLAC1 row 14 / rank 'Sr Preferred', at least 1 year"),
+        ("Non-subordinated eligible liabilities, EMTN series", nonsub, sp_emtn, "TLAC1 row 14 / rank 'Sr Preferred' and series EMTN, at least 1 year"),
         ("Non-subordinated eligible liabilities, upper bound", nonsub, sp_b + su_b, "TLAC1 row 14 / 'Sr Preferred' + 'Sr Unsecured' + 'Unsecured', at least 1 year"),
     ]
     print(f"  TLAC1 {ref1} against the bonds outstanding on that date ({len(live)} bonds, {len(ge1)} with at least 1 year left)")

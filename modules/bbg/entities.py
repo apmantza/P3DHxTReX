@@ -20,7 +20,7 @@ FIELDS = {
     "LATEST_PERIOD_END_DT_FULL_RECORD": "latest_period_end", "BS_TOT_ASSET": "total_assets", "NET_INCOME": "net_income", "IS_OPERATING_EXPN": "operating_expenses",
     "TOT_COMMON_EQY": "common_equity", "BS_CUSTOMER_DEPOSITS": "customer_deposits", "BS_TOT_LOAN": "total_loans", "BS_RISK_WEIGHTED_ASSETS": "rwa",
     "SALES_REV_TURN": "revenue", "RETURN_COM_EQY": "roe", "RETURN_ON_ASSET": "roa", "BS_TIER1_CAP_RATIO": "tier1_ratio", "IS_INT_INC": "interest_income",
-    "BS_CASH_NEAR_CASH_ITEM": "cash", "TRAIL_12M_NET_INC": "net_income_ltm", "COMPANY_TO_PARENT_RELATIONSHIP": "parent_relationship", "BUSINESS_STRUCTURE": "business_structure",
+    "BS_CASH_NEAR_CASH_ITEM": "cash", "TRAIL_12M_NET_INC": "net_income_ltm", "TRAIL_12M_CONT_INC": "net_income_cont_ltm", "COMPANY_TO_PARENT_RELATIONSHIP": "parent_relationship", "BUSINESS_STRUCTURE": "business_structure",
 }
 STRUCTURE = "CAST_CORPORATE_STRUCTURE"  # bulk field: the group of the issuer, each company with its debt, equity, and CDS ticker
 

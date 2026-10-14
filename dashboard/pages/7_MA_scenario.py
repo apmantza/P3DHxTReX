@@ -143,6 +143,13 @@ with st.sidebar.expander("Targets and ratios", expanded=True):
     number("Nearest listed peers for a bank without a market cap (k)", "Calc", "N17", 1, "%.0f", 1.0, minv=5.0, maxv=50.0, help_="Median multiple of the k listed banks with the closest return (sheet Peers).")
     number("Valuation basis of such a bank (1 tangible equity, 2 CET1, 3 average)", "Calc", "N18", 1, "%.0f", 1.0, minv=1.0, maxv=3.0,
            help_="CET1 is below tangible equity by the other CET1 deductions. 3 takes the average of both values.")
+    number("Growth rate for the cost of equity of the peers, g (%)", "Calc", "N23", 100, "%.1f", 0.5, minv=0.0, maxv=5.0,
+           help_="Gordon model: P/TBV = (return - g) / (cost of equity - g). The cost of equity of a peer is g + (return - g) / multiple.")
+    for slot_i, cell_ in ((1, "N24"), (3, "N25")):
+        if len(banks) > slot_i:
+            number(f"Cost of equity of {banks[slot_i].name[:30]} (%; 0 = that of its peers)", "Calc", cell_, 100, "%.1f", 0.5, minv=0.0, maxv=25.0,
+                   help_="A bank without a market cap is valued at the multiples of its peers. The peers do not show a size premium, so a higher cost of equity for a smaller, unlisted bank is a judgment. "
+                         "The peer value is scaled by (cost of equity of the peers - g) / (this - g). 0 = no adjustment (sheet Calc, rows 224 to 231).")
 with st.sidebar.expander("NBG"):
     number("Profit of the year (EUR bn)", "Calc", "D9", 1, "%.3f", 0.05, by_year=True, help_="Default: Bloomberg consensus of the year")
     number("Waived dividend (EUR bn)", "Calc", "D29", 1, "%.2f", 0.05)

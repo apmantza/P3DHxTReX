@@ -15,10 +15,13 @@ from .schema import UNIVERSE_MIN_EUR
 
 STATIC = ["ID_ISIN", "LEGAL_ENTITY_IDENTIFIER", "SECURITY_DES", "NAME", "CPN", "CPN_TYP", "MATURITY", "ISSUE_DT", "AMT_ISSUED", "AMT_OUTSTANDING", "CRNCY", "COLLAT_TYP",
           "PAYMENT_RANK", "SECURITY_TYP", "CALLABLE", "NXT_CALL_DT", "FIRST_CALL_DT_ISSUANCE", "MTY_TYP", "BASEL_III_DESIGNATION", "CAPITAL_CONTINGENT_SECURITY", "IS_PERPETUAL",
-          "RTG_SP", "RTG_MOODY", "RTG_FITCH", "PX_LAST", "YLD_YTM_MID", "Z_SPRD_MID", "OAS_SPREAD_MID", "DUR_ADJ_MID", "ID_BB_GLOBAL"]
+          "RTG_SP", "RTG_MOODY", "RTG_FITCH", "PX_LAST", "YLD_YTM_MID", "Z_SPRD_MID", "OAS_SPREAD_MID", "DUR_ADJ_MID", "ID_BB_GLOBAL", "SERIES"]
 COLUMNS = ["isin", "issuer_lei", "des", "name", "coupon", "coupon_type", "maturity", "issue_date", "amt_issued", "amt_outstanding", "currency", "collateral_type",
            "payment_rank", "security_type", "callable", "next_call", "first_call", "maturity_type", "basel_iii", "contingent", "perpetual", "rating_sp", "rating_moodys",
-           "rating_fitch", "px_last", "yield_mid", "z_spread", "oas", "duration", "bb_global"]
+           "rating_fitch", "px_last", "yield_mid", "z_spread", "oas", "duration", "bb_global", "series"]
+BOND_TABLE_COLUMNS = ["security", "pulled_at", "lei", "isin", "issuer_lei", "designation", "name", "coupon", "coupon_type", "maturity", "issue_date", "amt_issued", "amt_outstanding",
+                      "currency", "collateral_type", "payment_rank", "security_type", "callable", "next_call", "first_call", "maturity_type", "basel_iii", "contingent", "perpetual",
+                      "rating_sp", "rating_moodys", "rating_fitch", "px_last", "yield_mid", "z_spread", "oas", "duration", "bb_global", "series"]
 SUFFIX = re.compile(r"\b(s\.?a\.?|sa|ag|plc|spa|s\.p\.a\.?|nv|n\.v\.?|ab|a/s|as|asa|oyj|bank|banque|banco|banca|group|holdings?|holding|ltd|limited|se|dac|co|corp|the|of|de|di|and|und|et|kg|a\.s\.|s\.a|b\.v\.?|bv)\b")
 # Market data: Bloomberg field -> column of bbg_bond_market. Yields in percent, spreads in basis points.
 MARKET = {"PX_BID": "px_bid", "PX_ASK": "px_ask", "PX_MID": "px_mid", "PX_LAST": "px_last", "YLD_YTM_BID": "ytm_bid", "YLD_YTM_MID": "ytm_mid", "YLD_YTM_ASK": "ytm_ask",
@@ -29,6 +32,7 @@ MARKET = {"PX_BID": "px_bid", "PX_ASK": "px_ask", "PX_MID": "px_mid", "PX_LAST":
 MARKET_COLUMNS = ["quote_date", "px_bid", "px_ask", "px_mid", "px_last", "ytm_bid", "ytm_mid", "ytm_ask", "ytc_mid", "ytw", "worst_date", "i_spread", "z_spread", "g_spread",
                   "bench_spread", "bench_bond", "bench_yield", "asw_spread", "oas", "duration", "convexity", "amt_outstanding"]
 CAP = 990
+PERPETUAL_COUPONS = range(0, 15)
 # Banks that get bond-level data by default: NBG, BIL, Bank of Cyprus, HCOB, and the other Greek banks. Other banks: use --leis.
 FOCUS = {"5UMCZOEYKCVFAW8ZLO05": "NBG", "9CZ7TVMR36CYD5TZBS50": "BIL", "635400L14KNHZXPUZM19": "Bank of Cyprus", "TUKDD90GPC79G1KOE162": "HCOB",
          "213800KGF4EFNUQKAT69": "Eurobank", "213800DBQIB6VBNU5C64": "Alpha Bank", "213800OYHR1MPQ5VJL60": "Piraeus"}
@@ -117,10 +121,15 @@ def list_bonds(client: Client, ticker: str, expected: int = 0, issuer: str = "",
             for s, d in client.search(f"{ticker} {year}", "YK_FILTER_CORP", 1000):
                 if keep(s, d):
                     res[s] = d
-        for q in (f"{ticker} FRN", f"{ticker} PERP", f"{ticker} 0"):
+        for q in (f"{ticker} FRN", f"{ticker} 0"):
             for s, d in client.search(q, "YK_FILTER_CORP", 1000):
                 if keep(s, d):
                     res[s] = d
+    # Bloomberg finds a perpetual only when the query holds a coupon. The query "<ticker> 7 PERP" returns the perpetuals with a coupon from 7 to 7.99.
+    for n in PERPETUAL_COUPONS:
+        for s, d in client.search(f"{ticker} {n} PERP", "YK_FILTER_CORP", 1000):
+            if " PERP" in s and keep(s, d):
+                res[s] = d
     return list(res.items())
 
 
@@ -294,8 +303,8 @@ def pull(client: Client, conn: sqlite3.Connection, limit: int = 0, max_bonds: in
             recs.append((s, now, lei, m["ID_ISIN"], m["LEGAL_ENTITY_IDENTIFIER"], m["SECURITY_DES"], m["NAME"], m["CPN"], m["CPN_TYP"], m["MATURITY"], m["ISSUE_DT"], m["AMT_ISSUED"],
                          m["AMT_OUTSTANDING"], m["CRNCY"], m["COLLAT_TYP"], m["PAYMENT_RANK"], m["SECURITY_TYP"], m["CALLABLE"], m["NXT_CALL_DT"], m["FIRST_CALL_DT_ISSUANCE"],
                          m["MTY_TYP"], m["BASEL_III_DESIGNATION"], m["CAPITAL_CONTINGENT_SECURITY"], m["IS_PERPETUAL"], m["RTG_SP"], m["RTG_MOODY"], m["RTG_FITCH"], m["PX_LAST"],
-                         m["YLD_YTM_MID"], m["Z_SPRD_MID"], m["OAS_SPREAD_MID"], m["DUR_ADJ_MID"], m["ID_BB_GLOBAL"]))
-        conn.executemany("INSERT OR REPLACE INTO bbg_bond VALUES (" + ",".join("?" * 33) + ")", recs)
+                         m["YLD_YTM_MID"], m["Z_SPRD_MID"], m["OAS_SPREAD_MID"], m["DUR_ADJ_MID"], m["ID_BB_GLOBAL"], m["SERIES"]))
+        conn.executemany("INSERT OR REPLACE INTO bbg_bond (" + ", ".join(BOND_TABLE_COLUMNS) + ") VALUES (" + ",".join("?" * len(BOND_TABLE_COLUMNS)) + ")", recs)
         n_redeemed += sum(1 for rec in recs if not ((rec[12] or 0) > 0 and (rec[23] == "Y" or not rec[9] or rec[9] >= today)))
         _save_market(conn, data, {r: x[0] for r, x in req.items()}, today)
         conn.commit()

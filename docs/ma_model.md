@@ -47,7 +47,7 @@ Colours: blue on yellow is an input. Green font is a link to P3DH or Market. Bla
 | MREL requirement | KM2 (P3DH). |
 | IRRBB, encumbrance, non-performing loans | IRRBB1, AE1, CR1 (P3DH). |
 | Price, shares, market cap | Bloomberg, by LEI. Only for a bank with its own listed shares (market basis `self`). |
-| Profit | Consensus of the year (Bloomberg BEST). Without consensus: net income of the last 12 months (Bloomberg). |
+| Profit | Consensus of the year (Bloomberg BEST). Without consensus: income from continuing operations of the last 12 months (Bloomberg `TRAIL_12M_CONT_INC`). P3DH has no income statement. |
 | Revenue, EPS, DPS | Consensus (Bloomberg BEST) for NBG and for targets that have it. |
 | Opex and tax rate | Bloomberg: operating expenses of the last fiscal year, statutory tax rate (the effective rate if the statutory rate is missing). |
 | Valuation | Market cap (Bloomberg) for a listed bank. For a bank without listed shares: the median multiple of the nearest listed peers times its equity in P3DH (see below). |
@@ -103,15 +103,28 @@ Cash paid out of excess CET1 therefore reduces market cap by the cash. The two m
 - Set N6 to 0 to see the method of the original sheet. Then excess CET1 has no value, and a cash deal looks almost free.
 
 **Valuation of a bank without a market cap** (rows 32, 60, 129, and 160 to 167). The market cap of a listed bank is its Bloomberg market cap in EUR.
-A bank without listed shares (BIL, HCOB) is valued with its nearest listed peers (sheet Peers). The peers are the listed European banks of P3DH.
+A bank without listed shares (BIL, HCOB) is valued with its nearest listed peers (sheet Peers). The peers are the listed European banks of P3DH, without subsidiaries, cooperatives, and specialists.
+- A subsidiary is a bank that Bloomberg gives a parent in a group (field `COMPANY_TO_PARENT_RELATIONSHIP`: Subsidiary, Synthetic Parent, Related Entities). A parent that is a state, or a foundation that holds depositary receipts (ABN AMRO), does not count.
+- A cooperative has the Bloomberg subgroup Cooperative Banks, or a cooperative legal form or name (for example SCpA, Popolare, Caisse Regionale, Credit Agricole, Coop).
+- A specialist has a Bloomberg subgroup of leasing, commercial finance, brokerage, investment management, mortgage, or special purpose banks. Banca Sistema (factoring) is a named exception, because Bloomberg calls it a commercial bank.
+- The function is `peer_exclusion` in `dashboard/ma_market.py`. Sheet Peers lists the banks that it leaves out, with the reason.
+- The value of BIL depends on the peers. Each screen moved it by 10% or more. Check the result against the Gordon model below, and look at both bases (rows 165 and 166).
 - On tangible equity: the median P/TBV of the k banks whose return on tangible equity is closest to the return of the target, times the tangible equity of the target (CC1).
 - On CET1: the median P/CET1 (market cap in EUR / CET1 of P3DH) of the k banks whose return on CET1 is closest, times the CET1 of the target (KM1).
 - N17 sets k (default 20). N18 sets the basis: 1 tangible equity, 2 CET1, 3 the average of both (default).
 - The return of the target is its profit of the year divided by the equity. The peers use the profit of the last 12 months (EPS x shares).
+- **Cost of equity of the target** (levers N23 to N25, rows 224 to 231). The peers do not show a size premium, but a smaller and unlisted bank such as BIL has a higher cost of equity than its peers. This is a judgment, so it is an input.
+  Gordon model: P/TBV = (return - g) / (cost of equity - g). The cost of equity that a peer implies is g + (return - g) / multiple, with g in N23 (default 2%). Sheet Peers shows the median of the near peers (rows 7, columns X and following).
+  The peer value on each basis is scaled by (cost of equity of the peers - g) / (cost of equity of the target - g). N24 is the cost of equity of the first target (BIL, default 10%). N25 is the same for the third target (HCOB, default 0).
+  0 means no adjustment: the value is the plain median multiple. A target at or below g gets no adjustment. Bank of Cyprus is listed and has no adjustment. Row 231 shows the effect, and row 230 the value without it.
 A CET1 basis is needed because CET1 is below tangible equity by the other CET1 deductions. For BIL they are EUR 0.45bn (CET1 1.65bn, tangible equity 2.09bn). For HCOB they are EUR 1.6bn.
-Peers are valued on tangible book, which does not show these deductions. The CET1 basis gives a lower value for such a bank.
+Peers are valued on tangible book, which does not show these deductions. The CET1 basis can give a lower or a higher value than the tangible equity basis, depending on the peers. Rows 165 and 166 of Calc show both.
 A linear fit of P/TBV on RoTE is shown on sheet Peers for information. It is not used: a few banks with a high return and a high multiple raise the line.
-For BIL it gives a clearly higher value than the nearest peers. A Gordon model (P/TBV = (return - growth) / (cost of equity - growth)) with a cost of equity of 10% and growth of 2% is a third check.
+For BIL it gives a clearly higher value than the nearest peers. A Gordon model (P/TBV = (return - growth) / (cost of equity - growth)) with a growth of 2% is a third check.
+Do not fix the cost of equity at 10%. A fixed 10% is above the cost of equity that the peers imply, and the Gordon value of the peers then lies below their market P/TBV.
+Use the cost of equity that the peers imply: the median of (growth + (RoTE - growth) / P/TBV) of the peers. The Bloomberg analyst target prices give a second estimate: the same formula with the target P/TBV and the consensus RoTE.
+Analysts expect the return to rise (consensus EPS of the current year is above the EPS of the last 12 months), so the Gordon value on the consensus RoTE fits the market better than the value on the trailing RoTE.
+BIL has no analyst coverage: its Gordon value uses the trailing RoTE. Only peers with a consensus and a target price (mostly the large banks) are in the analyst estimate.
 A bank with a parent that is a bank group gets no value from the parent share price. A parent that is a conglomerate or a car maker says nothing about the bank.
 The result is a rule of thumb. It does not include control premium, quality of assets, or country risk. Use the premium (row 37) to change the price.
 
@@ -214,6 +227,8 @@ Valuation of BIL and HCOB: your sheet used 0.926x tangible equity for BIL (EUR 2
   The two bases differ clearly for both banks. A different k (10 to 30) moves the value of BIL by less than 10%.
 - For HCOB the net income of the last fiscal year and of the last 12 months differ clearly (sheet Market). The model uses the last 12 months. Check which one fits the case.
 - Opex, revenue, and net income of a bank without consensus are values of the last fiscal year or the last 12 months. They are not forecasts. The growth inputs extend them.
+- The profit of a bank without consensus leaves out discontinued operations. The net income of Bloomberg for BIL includes the gain on the sale of a subsidiary, so the model uses the income from continuing operations. This lowers the return on tangible equity of BIL, and so its peer-based valuation.
+  Bloomberg has no half-year result of 2026 for BIL: its profit is the last fiscal year.
 - The statutory tax rate is the rate on the law. The effective rates of BIL and HCOB differ much from it (sheet Market). The model uses the statutory rate.
 - The Bloomberg data is a pull of one day. The page warns when it is older than 7 days.
 - The size of the DTC lever (N16) and the waived dividend (D29) are scenario inputs.

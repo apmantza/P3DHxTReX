@@ -150,6 +150,8 @@ def test_build_and_identities(loaded) -> openpyxl.Workbook | None:
     k, basis = int(n("Calc", "N17")), int(n("Calc", "N18"))
     check("peers: k and the valuation basis are inputs (default 20 and the average of both bases)", k == 20 and basis == 3)
 
+    off = {("Calc", "N24"): 0.0, ("Calc", "N25"): 0.0}  # the cost of equity adjustment off: a pure test of the median multiples
+
     def nearest(col_x: str, col_y: str, x0: float) -> float:
         d = (pr[col_x] - x0).abs()
         return float(pr.loc[d <= d.nsmallest(k).iloc[-1], col_y].median())
@@ -158,14 +160,46 @@ def test_build_and_identities(loaded) -> openpyxl.Workbook | None:
         x_tbv, x_cet1 = n("Calc", f"{col}9") / n("Calc", f"{col}30"), n("Calc", f"{col}9") / n("Calc", f"{col}20")
         v_tbv, v_cet1 = nearest("rote", "ptbv", x_tbv) * n("Calc", f"{col}30"), nearest("rocet1", "pcet1", x_cet1) * n("Calc", f"{col}20")
         check(f"{n_name(run, col)} has no market cap: valued at the median multiple of the nearest peers, average of tangible equity and CET1 (independent calculation)",
-              market["slots"][m_]["basis"] != "self" and close(n("Calc", f"{col}165"), v_tbv, 1e-9) and close(n("Calc", f"{col}166"), v_cet1, 1e-9)
-              and close(n("Calc", f"{col}167"), (v_tbv + v_cet1) / 2) and close(n("Calc", f"{col}32"), (v_tbv + v_cet1) / 2) and run.get("Calc", f"{col}129") == "Nearest peers",
-              f"{n('Calc', f'{col}32'):.3f} vs {(v_tbv + v_cet1) / 2:.3f}")
+              market["slots"][m_]["basis"] != "self" and close(n("Calc", f"{col}165", off), v_tbv, 1e-9) and close(n("Calc", f"{col}166", off), v_cet1, 1e-9)
+              and close(n("Calc", f"{col}167", off), (v_tbv + v_cet1) / 2) and close(n("Calc", f"{col}32", off), (v_tbv + v_cet1) / 2) and run.get("Calc", f"{col}129") == "Nearest peers",
+              f"{n('Calc', f'{col}32', off):.3f} vs {(v_tbv + v_cet1) / 2:.3f}")
         for b, want in ((1, v_tbv), (2, v_cet1)):
-            check(f"{n_name(run, col)}: valuation basis {b} gives the value on {'tangible equity' if b == 1 else 'CET1'}", close(n("Calc", f"{col}32", {("Calc", "N18"): b}), want))
+            check(f"{n_name(run, col)}: valuation basis {b} gives the value on {'tangible equity' if b == 1 else 'CET1'}", close(n("Calc", f"{col}32", {**off, ("Calc", "N18"): b}), want))
     check("peers: exactly k banks near each target (no ties)", all(close(n("Peers", c + "8"), k) for c in "IKMOQS"), str([n("Peers", c + "8") for c in "IKMOQS"]))
     check("a larger k moves the median only a little (k = 30 within 25% of k = 20)", abs(n("Calc", "E32", {("Calc", "N17"): 30}) / n("Calc", "E32") - 1) < 0.25)
-    check("a switch of the valuation basis changes the value of BIL: CET1 basis below tangible equity basis (BIL CET1 is 21% under tangible equity)", n("Calc", "E166") < n("Calc", "E165"))
+    pc0 = W.peer_cols(0)
+    check("value of BIL on each basis = median multiple of its peers x its equity (tangible equity, CET1)",
+          close(n("Calc", "E165"), n("Peers", pc0["m_tbv"] + "7") * n("Calc", "E30") * n("Calc", "E228")) and close(n("Calc", "E166"), n("Peers", pc0["m_cet1"] + "7") * n("Calc", "E20") * n("Calc", "E229")))
+    check("the two bases give clearly different values for BIL (more than 1%), so the switch N18 matters; which one is higher depends on the peers",
+          abs(n("Calc", "E166") / n("Calc", "E165") - 1) > 0.01)
+
+    # cost of equity of the target (levers N23 to N25): the peer multiples are scaled by (cost of equity of the peers - g) / (cost of equity of the target - g)
+    g_ = n("Calc", "N23")
+
+    def implied_coe(col_x: str, x0: float, ret_col: str, mult_col: str) -> float:
+        d = (pr[col_x] - x0).abs()
+        sel = pr.loc[d <= d.nsmallest(k).iloc[-1]]
+        return float((g_ + (sel[ret_col] - g_) / sel[mult_col]).median())
+
+    check("levers: g is 2%, the cost of equity of BIL is 10%, and HCOB has no adjustment (0) by default", close(g_, 0.02) and close(n("Calc", "N24"), 0.10) and n("Calc", "N25") == 0.0)
+    for col, m_, lever in (("E", 1, "N24"), ("G", 3, "N25")):
+        x_tbv, x_cet1 = n("Calc", f"{col}9") / n("Calc", f"{col}30"), n("Calc", f"{col}9") / n("Calc", f"{col}20")
+        c_tbv, c_cet1 = implied_coe("rote", x_tbv, "rote", "ptbv"), implied_coe("rocet1", x_cet1, "rocet1", "pcet1")
+        check(f"{n_name(run, col)}: the cost of equity that the near peers imply, median of g + (return - g) / multiple (independent calculation)",
+              close(n("Calc", f"{col}226"), c_tbv) and close(n("Calc", f"{col}227"), c_cet1), f"{n('Calc', f'{col}226'):.4f} vs {c_tbv:.4f}; {n('Calc', f'{col}227'):.4f} vs {c_cet1:.4f}")
+        for coe in (0.09, 0.10, 0.11):
+            ov = {("Calc", lever): coe}
+            f_tbv, f_cet1 = (c_tbv - g_) / (coe - g_), (c_cet1 - g_) / (coe - g_)
+            v_t, v_c = nearest("rote", "ptbv", x_tbv) * n("Calc", f"{col}30") * f_tbv, nearest("rocet1", "pcet1", x_cet1) * n("Calc", f"{col}20") * f_cet1
+            check(f"{n_name(run, col)}: a cost of equity of {coe:.0%} scales the peer value by the Gordon factor (independent calculation)",
+                  close(n("Calc", f"{col}228", ov), f_tbv) and close(n("Calc", f"{col}229", ov), f_cet1) and close(n("Calc", f"{col}32", ov), (v_t + v_c) / 2),
+                  f"{n('Calc', f'{col}32', ov):.4f} vs {(v_t + v_c) / 2:.4f}")
+        vals = [n("Calc", f"{col}167", {("Calc", lever): coe}) for coe in (0.08, 0.09, 0.10, 0.11, 0.12)]
+        check(f"{n_name(run, col)}: a higher cost of equity of the target lowers its value", all(a > b for a, b in zip(vals, vals[1:])), str(vals))
+        check(f"{n_name(run, col)}: 0 removes the adjustment, and row 231 is the effect of the adjustment",
+              close(n("Calc", f"{col}228", off), 1.0) and close(n("Calc", f"{col}230"), n("Calc", f"{col}167", off)) and close(n("Calc", f"{col}231"), n("Calc", f"{col}167") - n("Calc", f"{col}230")))
+    check("the cost of equity of BoC (listed, valued at its market cap) has no effect on its value", close(n("Calc", "F228"), 1.0) and close(n("Calc", "F32"), market["slots"][2]["mcap"] / 1000))
+    check("a cost of equity of the target at or below g gives no adjustment (the formula would break)", close(n("Calc", "E228", {("Calc", "N24"): 0.02}), 1.0))
     check("a listed target (BoC) is valued at its market cap in EUR (Bloomberg)", close(n("Calc", "F32"), market["slots"][2]["mcap"] / 1000) and run.get("Calc", "F129") == "Market cap")
     check("tangible equity of HCOB from CC1 is 3.71bn", abs(n("Calc", "G30") - 3.709) < 0.01)
     check("profit of a bank without consensus is the net income of the last 12 months (BIL, HCOB)", all(
@@ -176,7 +210,7 @@ def test_build_and_identities(loaded) -> openpyxl.Workbook | None:
     check("market data is complete for every bank (row 152)", all(n("Calc", f"{c}152") == 1 for c in "DEFG"))
     typed = [k for k, raw in model.cells.items() if k[0] == "Calc" and isinstance(raw, (int, float)) and not isinstance(raw, bool)]
     allowed = {"D1", "D2", "H2", "I2", "J2", "H4", "I4", "J4", "D29", "E37", "F37", "G37", "D65", "E63", "F63", "G63", "E64", "F64", "G64", "E65", "F65", "G65"}
-    allowed |= {f"{c}{r}" for c in "HIJ" for r in range(67, 72)} | {f"N{r}" for r in range(4, 23)}
+    allowed |= {f"{c}{r}" for c in "HIJ" for r in range(67, 72)} | {f"N{r}" for r in range(4, 26)}
     bad = sorted(co for sh, co in typed if co not in allowed)
     check("typed numbers in Calc are only deal levers and assumptions (no profit, opex, tax rate, valuation, or P3DH item)", not bad, str(bad[:12]))
     data_rows = [f"{c}{r}" for c in "DEFG" for r in (9, 32, 60, 61, 62) if not (c == "D" and r == 60)] + [f"{c}{r}" for c in "EFG" for r in range(161, 168)]
