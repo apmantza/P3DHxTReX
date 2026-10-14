@@ -52,6 +52,8 @@ CELLS = {
     "cr1_loans_npl": ("K_21.01", "0020", "0040"),
     "lr1_total_assets": ("K_70.00", "0010", "0010"),
 }
+# A template with several sheets repeats a row and a column in each sheet (CR1: .a amounts, .b by counterparty, .d impairments, ...). The cell code must start with the sheet of the amounts.
+CELL_SHEET = {"K_21.01": "{K_21.01.a,"}
 IRRBB_ROWS = {"0010": "Parallel up", "0020": "Parallel down", "0030": "Steepener",
               "0040": "Flattener", "0050": "Short rates up", "0060": "Short rates down"}
 CC2_ASSETS, CC2_EQUITY = "{K_66.02.b, r0010, c0010}", "{K_66.02.f, r0010, c0010}"
@@ -158,9 +160,11 @@ def _latest_filing(frame: pd.DataFrame) -> pd.DataFrame:
 
 def _load_cells(query: Query, key: str, as_of: str, items: dict[str, Item]) -> None:
     for tpl in sorted({t for t, _, _ in CELLS.values()}):
-        d = query("""SELECT reference_date, row_code, column_code, value, quality FROM clean_fact
+        d = query("""SELECT reference_date, cell_code, row_code, column_code, value, quality FROM clean_fact
                      WHERE entity_key = ? AND template_code = ? AND reference_date <= ? AND value IS NOT NULL
                        AND quality <> 'quarantined' AND sheet = '' AND key_descriptor = ''""", (key, tpl, as_of))
+        if tpl in CELL_SHEET:
+            d = d[d["cell_code"].str.startswith(CELL_SHEET[tpl])]
         wanted = {(row, col) for t, row, col in CELLS.values() if t == tpl}
         d = d[pd.Series([(r, c) in wanted for r, c in zip(d["row_code"], d["column_code"])], index=d.index, dtype=bool)]
         d = _latest_filing(d)

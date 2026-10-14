@@ -182,6 +182,26 @@ C:\Users\E40889\Documents\blauto\.venv\Scripts\python scripts/pull_bloomberg.py 
 
 The data is not in git. Do not publish it. Refresh the data by cadence with `scripts/refresh_bloomberg.py daily | weekly | monthly` (or `refresh_bloomberg.bat`): only the monthly run requests new unique securities. `scripts/mrel_vs_bonds.py --lei <LEI>` compares the MREL templates of P3DH with the bonds of a bank. `docs/bloomberg_db.md` describes the tables, the limit of unique securities, the matching, the market basis, the ownership data, and the limits of the bond data.
 
+### External statistics by country (ECB, Eurostat)
+
+The tables `ext_*` hold public statistics for every EU country in one schema: rates of banks (new loans, the book, deposits), stocks and growth of loans and deposits, the bank lending survey, profit and loss and ratios of the banks of a country, supervisory ratios, the structure of the banking sector, market rates, and the economy (house prices, GDP, unemployment, inflation, government debt). They need no terminal and no key:
+
+```bash
+python scripts/pull_ext.py all        # 60 curated indicators, about 75 seconds
+python scripts/pull_ext.py bulk       # every series of the ECB sets MIR, BSI, BLS, CBD2, SUP, SSI with the full history (about 5.5 million observations)
+python scripts/pull_ext.py status     # what the database holds
+```
+
+Each series has a `concept` (its key without frequency and country), so one join compares the same measure in all countries. The table `ext_geo_group` holds 11 geographic groups (Benelux, DACH, Southern Europe, and others).
+Two tools use the data:
+
+```bash
+python scripts/pass_through.py --group Benelux      # pass-through of the 3-month Euribor to deposit and loan rates, by country, product, and rate cycle (table ext_passthrough)
+python scripts/benchmark_bank.py --lei <LEI>        # one bank against its country, the euro area, the EU, and its groups: capital, liquidity, asset quality, income, loan mix, loan growth, rate sensitivity
+```
+
+`docs/external_statistics.md` describes the sources, the tables and views, the method and the limits of the pass-through and of the benchmark, and the ECB list of supervised entities (checked, not loaded yet).
+
 ## Rules
 
 - Run one downloader process at a time. A lock file in `data/runs/p3dh` enforces this. The default limit is 60 requests per minute.

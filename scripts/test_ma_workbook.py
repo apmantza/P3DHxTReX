@@ -331,6 +331,30 @@ def test_km2_sub_requirements() -> None:
     check("13.5% of TREA is the most frequent value among banks of EUR 100bn to 250bn", (top[top["size_class"].astype(str) == "Large"]["sub"].round(3) == 0.135).sum() >= 5)
 
 
+def test_cr1_sheet() -> None:
+    print("4c. CR1 loans come from the sheet of the amounts (K_21.01.a), not from a sheet of impairments or counterparties")
+    db = ROOT / "data" / "processed" / "p3dh.sqlite"
+    if not db.exists():
+        print("  skipped (no database)")
+        return
+    conn = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
+    query = lambda sql, params=(): pd.read_sql_query(sql, conn, params=params)  # noqa: E731
+    ents = query("SELECT DISTINCT entity_key FROM clean_fact WHERE template_code = 'K_21.01'")["entity_key"].tolist()[:150]
+    bad = []
+    for e in ents:
+        items: dict = {}
+        ma_data._load_cells(query, e, "2026-12-31", items)
+        for name, col in (("cr1_loans_performing", "0010"), ("cr1_loans_npl", "0040")):
+            it = items.get(name)
+            if it is None:
+                continue
+            a = query("SELECT value FROM clean_fact WHERE entity_key = ? AND template_code = 'K_21.01' AND reference_date = ? AND cell_code = ? AND sheet = '' AND key_descriptor = '' AND quality <> 'quarantined'",
+                      (e, it.period, "{K_21.01.a, r0020, c%s}" % col))
+            if a.empty or abs(a["value"].iloc[0] - it.value) > 1:
+                bad.append((e, name))
+    check("the CR1 cell of each of 150 banks equals the cell of sheet .a", not bad, f"{bad[:3]}")
+
+
 def test_independent(wb: openpyxl.Workbook | None) -> None:
     print("4. independent recalculation with the library formulas")
     if wb is None:
@@ -397,6 +421,7 @@ if __name__ == "__main__":
     loaded = load_banks()
     wb = test_build_and_identities(loaded)
     test_km2_sub_requirements()
+    test_cr1_sheet()
     test_independent(wb)
     test_page(wb)
     if FAILED:
