@@ -162,11 +162,25 @@ Pages: Overview, Peer explorer (KM1 by size and geography), Greek banks (against
 
 ### M&A scenario
 
-The page `M&A scenario` combines NBG (or any other bank) with any target bank in P3DH. It uses only P3DH data. You enter the price, the payment mix, new funding, and costs. The page shows pro-forma capital, distance to MDA, leverage, LCR, NSFR, MREL, IRRBB, encumbrance, size class, and the position among all banks. It also shows sensitivity grids and the largest cash payment that keeps a CET1 floor. `docs/ma_model.md` gives the formulas and the limits. Test it with:
+The page `M&A scenario` combines NBG with up to three banks of P3DH. It runs the formulas of the Excel file `docs/M&A calc v2.xlsx` (sheets Calc and Merger), so the page and the file give the same numbers. Data: P3DH (capital, buffers, MREL, leverage, liquidity, IRRBB) and the Bloomberg tables of the same database (price, consensus, profit, opex, tax rate, rates). A bank without listed shares (BIL, HCOB) is valued with its nearest listed European peers of P3DH (median P/TBV and P/CET1 of the banks with the closest return). The page shows the first-year analysis, a four-year merger model (2026E to 2029E), the regulatory view, sensitivity grids, the issuance needs (CET1, AT1, Tier 2, and MREL layers, with requirements weighted by RWAs, the AT1 and Tier 2 buckets from the P2R, and a subordination assumption from the filings of other banks), the data used (with the average deposit rate for each year, half year, and quarter), and a review of the original sheet. You can download the file with your inputs.
 
 ```bash
-.venv/Scripts/python scripts/test_ma_model.py
+dashboard/.venv/Scripts/python scripts/build_ma_workbook.py   # build docs/M&A calc v2.xlsx
+dashboard/.venv/Scripts/python scripts/test_ma_workbook.py    # tests (evaluator, identities, data policy, page)
+dashboard/.venv/Scripts/python scripts/test_bbg.py            # tests of the Bloomberg modules
 ```
+
+`docs/ma_model.md` gives the formulas, the sources, and the limits.
+
+### Bloomberg data
+
+The tables `bbg_*` of the database hold rates and curves since 1999, the average deposit rate per month, quarter, half year, and year, the expected deposit rate from the OIS curve, every P3DH bank matched to Bloomberg (by LEI, by a LEI rebuilt from the P3DH code, or by name) with its equity, parent, and debt tickers, prices and fundamentals of the listed banks, consensus, the 20 largest holders of the listed banks with state participation, and the bonds with an outstanding amount above EUR 150m (the universe) with price, yields (maturity, call, worst), I-, Z-, and G-spreads, and a daily history. Pull the data with the Python of the blauto project (it has `blpapi`; the terminal must run):
+
+```bash
+C:\Users\E40889\Documents\blauto\.venv\Scripts\python scripts/pull_bloomberg.py rates      # then: entities, equity, ownership, bonds, bondmarket, bondhist, status
+```
+
+The data is not in git. Do not publish it. Refresh the data by cadence with `scripts/refresh_bloomberg.py daily | weekly | monthly` (or `refresh_bloomberg.bat`): only the monthly run requests new unique securities. `scripts/mrel_vs_bonds.py --lei <LEI>` compares the MREL templates of P3DH with the bonds of a bank. `docs/bloomberg_db.md` describes the tables, the limit of unique securities, the matching, the market basis, the ownership data, and the limits of the bond data.
 
 ## Rules
 

@@ -34,6 +34,7 @@ CELLS = {
     "cc1_minority": ("K_66.01", "0090", "0010"),
     "cc1_dta_deducted": ("K_66.01", "0140", "0010"),
     "cc1_dta_temporary": ("K_66.01", "0280", "0010"),
+    "cc1_dta_below": ("K_66.01", "0890", "0010"),
     "cc1_at1": ("K_66.01", "0540", "0010"),
     "cc1_t2": ("K_66.01", "0710", "0010"),
     "km2_ofel": ("K_90.01", "0010", "0010"),
@@ -179,6 +180,25 @@ def _load_cells(query: Query, key: str, as_of: str, items: dict[str, Item]) -> N
             items[name] = Item(float(hit["value"]), hit["reference_date"], f"K_66.02 {cell}", hit["quality"])
 
 
+def _load_dta(query: Query, key: str, as_of: str, items: dict[str, Item]) -> None:
+    """Deferred tax assets of the balance sheet (CC2). The label of the line differs between banks, so the lines are found by their text."""
+    d = query("""SELECT reference_date, key_descriptor, value, quality FROM clean_fact
+                 WHERE entity_key = ? AND template_code = 'K_66.02' AND reference_date <= ? AND column_code = '0010' AND value IS NOT NULL
+                   AND quality <> 'quarantined' AND LOWER(key_descriptor) LIKE '%deferred tax asset%' AND LOWER(key_descriptor) NOT LIKE '%liabilit%'""", (key, as_of))
+    d = _latest_filing(d)
+    if d.empty:
+        return
+    kd = d["key_descriptor"].str.lower()
+    nonreliant = d[kd.str.contains("not rely") | kd.str.contains("do not r")]
+    total = d[~kd.str.contains("of which") & ~kd.str.contains("rely") & ~kd.str.contains("memorandum")]
+    if not total.empty:
+        r = total.sort_values("value", ascending=False).iloc[0]
+        items["dta_total"] = Item(float(r["value"]), r["reference_date"], "K_66.02 " + str(r["key_descriptor"]), r["quality"])
+    if not nonreliant.empty:
+        r = nonreliant.iloc[0]
+        items["dta_nonreliant"] = Item(float(r["value"]), r["reference_date"], "K_66.02 " + str(r["key_descriptor"]), r["quality"])
+
+
 def _load_assets(query: Query, key: str, as_of: str, items: dict[str, Item]) -> None:
     d = query("""SELECT period_end, total_assets_eur, assets_source, assets_method FROM entity_assets
                  WHERE entity_key = ? AND period_end <= ? AND total_assets_eur IS NOT NULL
@@ -231,7 +251,29 @@ def load_bank(query: Query, key: str, as_of: str) -> BankData:
     _load_km1(query, key, as_of, bank.items)
     _load_ov1(query, key, as_of, bank.items)
     _load_cells(query, key, as_of, bank.items)
+    _load_dta(query, key, as_of, bank.items)
     _load_assets(query, key, as_of, bank.items)
     _ratio_scale(bank.items)
     _load_irrbb(query, key, as_of, bank)
     return bank
+
+
+def km2_sub_requirements(query: Query) -> pd.DataFrame:
+    """Latest KM2 of each bank: the MREL requirement and the part to be met with own funds or subordinated liabilities, as % of TREA (rows EU-7 and EU-8) and of TEM (EU-9, EU-10).
+    The ratio cells are fractions for some banks and percentage points for others, so the unit is tested for each cell: above 1.5 means percentage points, above 100 is an error."""
+    d = query("""SELECT entity_key, reference_date, row_code, value FROM clean_fact WHERE template_code = 'K_90.01' AND row_code IN ('0120', '0130', '0140', '0150') AND value IS NOT NULL""")
+    if d.empty:
+        return pd.DataFrame(columns=["entity_key", "bank", "country", "size_class", "reference_date", "mrel", "sub", "mrel_tem", "sub_tem"])
+
+    def frac(v: float) -> float:
+        return float("nan") if v < 0 or v > 100 else (v / 100 if v > 1.5 else v)
+
+    d["v"] = d["value"].map(frac)
+    last = d.sort_values("reference_date").groupby(["entity_key", "row_code"]).tail(1)
+    wide = last.pivot(index="entity_key", columns="row_code", values="v").rename(columns={"0120": "mrel", "0130": "sub", "0140": "mrel_tem", "0150": "sub_tem"})
+    for c in ("mrel", "sub", "mrel_tem", "sub_tem"):
+        if c not in wide:
+            wide[c] = float("nan")
+    wide["reference_date"] = last.groupby("entity_key").reference_date.max()
+    cls = query("SELECT entity_key, entity_name AS bank, country, size_class FROM v_entity_class")
+    return wide.reset_index().merge(cls, on="entity_key", how="left")

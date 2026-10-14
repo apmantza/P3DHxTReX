@@ -1,133 +1,231 @@
-# M&A scenario model
+# M&A model
 
-The page `dashboard/pages/7_MA_scenario.py` combines two banks. The default acquirer is National Bank of Greece (NBG).
-You can choose any other bank in P3DH as the acquirer or the target.
-The model shows the position of the combined bank on the day the deal closes.
+The M&A model combines NBG with up to three target banks. It exists in two forms that use the same formulas:
 
-## Data rule
+- The Excel file `docs/M&A calc v2.xlsx` (sheets Calc and Merger). The file is not in git. It holds Bloomberg data.
+- The Streamlit page `M&A scenario` (`dashboard/pages/7_MA_scenario.py`).
 
-Every input comes from the P3DH clean layer. The model uses no number from the draft workbook in the folder `M&A`.
-The model has no market price and no profit data, because P3DH has neither. You enter the price and the costs.
+The page does not copy the formulas. It reads them from the workbook and runs them with a small evaluator (`dashboard/ma_sheet.py`).
+So each number on the page is a cell of the Excel file.
 
-The loader is `dashboard/ma_data.py`. The calculation is `dashboard/ma_model.py`.
-Neither file needs Streamlit. The test is `scripts/test_ma_model.py`.
+## Files
 
-## Inputs from P3DH
+| File | Purpose |
+|---|---|
+| `dashboard/ma_workbook.py` | Writes the sheets and the formulas. Holds the review log, the table of typed numbers, the layout of the page, and the defaults. |
+| `dashboard/ma_sheet.py` | Evaluator for Excel formulas (SUM, AVERAGE, MAX, MIN, IF, IFERROR, CHOOSE, COUNT, MEDIAN, SLOPE, INTERCEPT, RSQ, ABS, AND, OR, NOT, ROUND, TEXT). |
+| `dashboard/ma_data.py` | Reads the P3DH clean layer (KM1, OV1, CC1, CC2, KM2, LR1, IRRBB1, AE1, CR1) for one bank and one quarter. |
+| `dashboard/ma_market.py` | Reads the Bloomberg tables of the database (`bbg_*`) for the four banks, the nearest peers, and the deposit rates. Links to P3DH by the LEI. |
+| `scripts/build_ma_workbook.py` | Builds the Excel file. You can choose three other targets. |
+| `scripts/pull_bloomberg.py` | Pulls Bloomberg data into the database. See `docs/bloomberg_db.md`. |
+| `scripts/test_ma_workbook.py` | Tests of the evaluator, the workbook, the identities, the data policy, and the page. |
+| `scripts/test_bbg.py` | Tests of the Bloomberg modules (curve maths, rates, bond names, market basis, coverage). |
 
-| Group | Template | Rows used |
-|---|---|---|
-| Capital, buffers, leverage, liquidity | KM1 (K_61.00) | CET1, Tier 1, total capital, TREA, P2R, buffers, leverage exposure, HQLA, net outflows, ASF, RSF |
-| Risk exposure by type | OV1 (K_60.00) | credit, CCR, CVA, securitisation, market, operational |
-| Common equity, intangible assets | CC1 (K_66.01) | rows 0110, 0130, 0090 |
-| Total assets, equity (fallback) | CC2 (K_66.02), LR1 (K_70.00), table `entity_assets` | total assets, total equity |
-| MREL | KM2 (K_90.01) | resources, subordinated resources, TREA, TEM, requirements |
-| Interest rate risk | IRRBB1 (K_68.00) | change of economic value of equity and net interest income, 6 scenarios |
-| Encumbrance | AE1 (K_20.01) | encumbered and unencumbered assets |
-| Asset quality | CR1 (K_21.01) | performing and non-performing loans |
+## Sheets of the Excel file
 
-Abbreviations: TREA is the total risk exposure amount. TEM is the total exposure measure.
-HQLA is high-quality liquid assets. ASF and RSF are available and required stable funding.
-P2R is the Pillar 2 requirement. MDA is the maximum distributable amount.
+- **Calc**: the calculation for one year. Cell N15 chooses the year (1 = 2026E to 4 = 2029E, default 2027E). Rows 1 to 58 keep the cells of your original sheet. Rows from 59 are new.
+- **Merger**: the four-year model (2026E to 2029E) for each of the three deals. It follows Figure 89, the picture in your original sheet.
+- **P3DH**: the data of the EBA Pillar 3 Data Hub, with the period and the quality of each value.
+- **Market**: Bloomberg data from the database, one column for each bank (NBG and the three targets): price, shares, market cap, profit, consensus, opex, tax rate. It also holds the ESTR OIS curve and the average deposit rate for each year, half year, and quarter. Do not publish this sheet.
+- **Peers**: the listed European banks of P3DH with P/TBV, P/CET1, and returns. For each target without a market cap it picks the k banks with the closest return and takes the median multiple. Do not publish this sheet.
+- **Review**: each finding about the original sheet, the effect of the corrections, and a table of every typed number of the original.
+- **Guide**: how to use the file.
+- **Original (user)**: your sheet, unchanged, with its picture.
 
-Rules for the loader:
+Colours: blue on yellow is an input. Green font is a link to P3DH or Market. Black is a formula. A green fill in column C marks a new row.
 
-- KM1 and OV1 values come from the quarter you choose. The target uses its newest quarter up to that date, within 12 months.
-- The loader reads all cells of one template from one filing only. It never mixes cells of two filings.
-- A cell with quality `quarantined` is not used.
-- The model marks each input as verified or not verified. The inputs table in the page shows the result.
-- KM2 ratio cells can be fractions or percentage points. The model tests the unit with own funds divided by TREA.
+## Data sources
 
-## Deal inputs
+| Item | Source |
+|---|---|
+| Size, RWAs, CET1, AT1, Tier 2 | KM1 and CC2 or LR1 (P3DH). AT1 = Tier 1 less CET1. Tier 2 = total capital less Tier 1. |
+| MREL-eligible liabilities | KM2 own funds and eligible liabilities less total capital. KM2 and TLAC1 count items after deductions, so the amount is MREL-eligible. |
+| Senior non-preferred and senior preferred | KM2: own funds and subordinated liabilities (row 1a) gives the subordinated part. The rest is non-subordinated (senior preferred). |
+| Deferred tax assets | CC2 (balance sheet line "Deferred tax assets", and "of which: do not rely on future profitability" = DTCs). CC1 rows 10, 21 and 75 for the deduction and the amount below the threshold. |
+| Tangible equity | CC1 row 6 (common equity before adjustments) less row 8 (intangible assets). |
+| P2R, buffers, leverage, liquidity | KM1 (P3DH). |
+| MREL requirement | KM2 (P3DH). |
+| IRRBB, encumbrance, non-performing loans | IRRBB1, AE1, CR1 (P3DH). |
+| Price, shares, market cap | Bloomberg, by LEI. Only for a bank with its own listed shares (market basis `self`). |
+| Profit | Consensus of the year (Bloomberg BEST). Without consensus: net income of the last 12 months (Bloomberg). |
+| Revenue, EPS, DPS | Consensus (Bloomberg BEST) for NBG and for targets that have it. |
+| Opex and tax rate | Bloomberg: operating expenses of the last fiscal year, statutory tax rate (the effective rate if the statutory rate is missing). |
+| Valuation | Market cap (Bloomberg) for a listed bank. For a bank without listed shares: the median multiple of the nearest listed peers times its equity in P3DH (see below). |
+| Expected deposit rate | Bloomberg: the realised ECB deposit rate and the ESTR OIS curve (see below). |
+| Cash share, stake, premium | Your levers. They are the only deal inputs that have no data source. |
+| Deposit data | Not available in P3DH. The model has no deposits row. |
 
-You choose the price basis: tangible book value, CET1 capital, or a fixed amount.
-You also choose the stake (50% to 100%), the cash share, new instruments, costs, and effects of the combination.
+BIL and HCOB use only P3DH and Bloomberg. Row 152 of Calc checks that every bank has a profit, an opex, a tax rate, and a valuation.
+A test checks that no typed number is in these rows.
 
-Tangible book value of the target is `E - I`. `E` is the common equity before adjustments (CC1 row 0110). `I` is the intangible assets (CC1 row 0130).
+## Expected deposit rate
 
-## Formulas
+The profit of a deal depends on the rate that the cash earns. The model uses the average expected ECB deposit rate of each calendar year.
 
-Notation: `k` is the stake. `P` is the price for the stake. `C` is the cash part of `P`. `S` is the part paid in new shares, so `P = C + S`.
+1. The model bootstraps discount factors from the ESTR OIS swap rates (1 week to 10 years).
+2. The forward ESTR of a period is the average over that period. The model adds the spread of the deposit rate to ESTR on the pull date (6.1 bp).
+3. A period that is over has its realised average. A period that has not ended has the realised rate to the pull date, then the forward rate.
+4. The ECB applies a new rate on the first Wednesday after the meeting. The database holds both series: the day of the decision and the day the rate applies.
+   The model uses the second one (2.00% to 16 June 2026, 2.25% to 15 September, 2.50% since).
 
-**Price.** `P = k x multiple x TBV` for the basis tangible book. `P = k x multiple x CET1` for the basis CET1 capital.
+Calc uses the year in N15. Merger uses the average of each year.
+Sheet Market also lists the average for each half year and each quarter (2025 to 2028). The database has them for every month, quarter, half, year, YTD and LTM since 1999 (view `v_dfr_average`).
+The view `v_dfr_p3dh` gives, for each P3DH reference date, the spot rate and the averages of the quarter, half, year to date, and the last 12 months.
 
-**Fair value and costs.** After-tax fair value write-down `F = write-down % x TBV x (1 - tax)`.
-After-tax integration cost `N = integration % x TBV x (1 - tax)`. Transaction cost `X = transaction % x P`.
+## Calc: formulas
 
-**Goodwill.** The purchase accounting writes off the existing intangible assets of the target (`I`) and books new goodwill.
-Goodwill = `max(P - k x (TBV - F), 0)`, with `TBV = E - I`. A negative result is a gain from a bargain purchase.
-A price of exactly 1.0 times tangible book therefore gives no goodwill and no gain.
-CC1 does not split `I` into goodwill and other intangible assets, so the model treats all of `I` the same way.
+Notation: `D` is NBG. `E`, `F`, `G` are the targets. `H`, `I`, `J` are the combinations. `K` is NBG at the CET1 target. `k` is the stake.
 
-**Pro-forma CET1.**
+**Price.** Price for the stake = `k x valuation x (1 + premium)` (row 38). Cash paid = cash share x price (row 74).
+New shares = share paid in shares x price / NBG share price (row 48).
 
-`CET1 = CET1(A) + CET1(T) - C + NCI(eligible) - NCI(removed) - k x F - N - X + new CET1`
+**CET1** (row 20). `CET1(NBG) + CET1(target) - cash paid + minority interest counted - minority interest removed - k x fair value write-down - transaction cost + new CET1`.
+Equity paid in shares does not change this sum. Each euro of cash reduces CET1 by one euro.
 
-The equity route gives the same result: parent equity + new shares - the other deductions of the target - new goodwill.
-The result does not depend on the split between goodwill and other items.
-A deal paid in shares with no cost adds the two CET1 amounts. Each euro of cash paid reduces CET1 by one euro.
+**Goodwill** (rows 80 to 82). The purchase accounting writes off the intangible assets of the target and books new goodwill:
+`price - k x (tangible equity - fair value write-down)`. A negative result is a gain from a bargain purchase.
+A price of exactly 1.0 times tangible equity gives no goodwill and no gain.
 
-**Book equity and CET1.** Tangible book value is higher than CET1. CET1 also deducts additional value adjustments, deferred tax assets,
-the expected-loss shortfall, pension assets, and other regulatory adjustments. The page shows the bridge from CC1 row 6 to KM1 CET1 for both banks.
-The model flags a bank where CC1 row 6 plus the total adjustments (row 28) differs from KM1 CET1 by more than 2%.
-This happens for about 4% of the banks (411 tested at their latest quarter).
+**Minority interest** (rows 84 and 85). Removed: `(1 - k) x tangible equity`. Counted: `(1 - k) x min(CET1 of the target, CET1 requirement x RWAs)`.
 
-Minority interest applies when `k` is below 100%. `NCI(removed) = (1 - k) x TBV`.
-`NCI(eligible) = (1 - k) x min(CET1(T), CET1 requirement of T x TREA(T))`. This follows the rule of Article 84 CRR in a simple form.
+**Profit** (rows 9 to 12). The profit of the year in N15: consensus, else net income of the last 12 months. `Profit(NBG) + k x profit(target) - after-tax deposit income on cash paid - after-tax integration cost`.
+Integration cost = integration % x opex of the target / years x (1 - tax rate).
 
-**Other capital.** AT1 and Tier 2 are the sum of both banks, times the recognition factor for the target, plus new instruments.
-`TREA = TREA(A) x (1 + change A) + TREA(T) x (1 + change T)`.
+**ROCET1** (row 13). Profit, less the after-tax deposit income on CET1 above the target, divided by the target CET1 ratio times RWAs.
+The combinations use RWAs attributable to NBG holders (row 88: NBG + k x target).
 
-**Requirements.** The countercyclical and systemic risk buffers are weighted by TREA.
-The G-SII or O-SII buffer follows your rule (higher of the two, one bank, or own value).
-P2R follows your rule (weighted by TREA, one bank, or own value).
-The CET1 requirement is `4.5% + P2R (CET1 part) + combined buffer`. Tier 1 uses 6% and total capital uses 8%.
+**Cash paid, equity, and market cap.** Cash paid leaves the group. It reduces CET1 and tangible equity one for one. Only new shares add equity.
+Market cap is the value of the business plus the excess CET1 above the target. The market values excess CET1 at N6 (default 1.0, book value).
+Cash paid out of excess CET1 therefore reduces market cap by the cash. The two methods (rows 31 to 33) use this rule:
+- P/E method: `P/E x (profit without the integration cost and without income on excess CET1) + N6 x excess CET1`. The default P/E (N3) is the P/E of NBG on the same basis, so a deal that changes nothing gives no upside.
+- P/TBV method: the P/TBV at the CET1 target of both banks (market cap without excess CET1 over tangible equity at the CET1 target), weighted by tangible equity at the CET1 target,
+  applied to the tangible equity at the CET1 target of the combination (row 45), plus `N6 x excess CET1`.
+- Set N6 to 0 to see the method of the original sheet. Then excess CET1 has no value, and a cash deal looks almost free.
 
-**Distance to MDA.** The model computes the headroom of each of the 3 layers in euro. The smallest headroom is the distance to MDA.
-It shows the result in basis points of TREA and names the binding layer.
+**Valuation of a bank without a market cap** (rows 32, 60, 129, and 160 to 167). The market cap of a listed bank is its Bloomberg market cap in EUR.
+A bank without listed shares (BIL, HCOB) is valued with its nearest listed peers (sheet Peers). The peers are the listed European banks of P3DH.
+- On tangible equity: the median P/TBV of the k banks whose return on tangible equity is closest to the return of the target, times the tangible equity of the target (CC1).
+- On CET1: the median P/CET1 (market cap in EUR / CET1 of P3DH) of the k banks whose return on CET1 is closest, times the CET1 of the target (KM1).
+- N17 sets k (default 20). N18 sets the basis: 1 tangible equity, 2 CET1, 3 the average of both (default).
+- The return of the target is its profit of the year divided by the equity. The peers use the profit of the last 12 months (EPS x shares).
+A CET1 basis is needed because CET1 is below tangible equity by the other CET1 deductions. For BIL they are EUR 0.45bn (CET1 1.65bn, tangible equity 2.09bn). For HCOB they are EUR 1.6bn.
+Peers are valued on tangible book, which does not show these deductions. The CET1 basis gives a lower value for such a bank.
+A linear fit of P/TBV on RoTE is shown on sheet Peers for information. It is not used: a few banks with a high return and a high multiple raise the line.
+For BIL it gives a clearly higher value than the nearest peers. A Gordon model (P/TBV = (return - growth) / (cost of equity - growth)) with a cost of equity of 10% and growth of 2% is a third check.
+A bank with a parent that is a bank group gets no value from the parent share price. A parent that is a conglomerate or a car maker says nothing about the bank.
+The result is a rule of thumb. It does not include control premium, quality of assets, or country risk. Use the premium (row 37) to change the price.
 
-**Leverage.** Leverage exposure = both exposures, minus removed exposure, plus the change of cash.
-Leverage ratio = Tier 1 divided by leverage exposure.
+**Stake in BIL.** The stake is 90% because the State of Luxembourg holds 10% and does not sell. Price = stake x valuation x (1 + premium).
+A premium of -10% on top of a stake of 90% would count the 10% twice, so the default premium is 0%.
 
-**Cash.** The change of cash = new instruments - cash paid - transaction cost - integration cost (before tax).
-A negative change reduces HQLA and leverage exposure by the same amount.
+**NBG at the CET1 target** (column K). NBG pays out its excess CET1. Market cap falls by the same amount. Profit falls by the after-tax deposit income.
+The price effect is 0%. The method of the original sheet shows a gain of 13% that has no cause.
 
-**LCR.** `(HQLA(A) + HQLA(T) + change of cash) / (net outflows(A) + net outflows(T))`.
-The model pools the liquidity of both banks.
+**Shares and EPS** (rows 48 to 53). The EPS at the CET1 target removes the excess CET1 from profit (after-tax deposit income) and from the share count (at the NBG price).
 
-**NSFR.** `ASF = ASF(A) + ASF(T) + new instruments + S - k x E`. `RSF = RSF(A) + RSF(T)`.
-The term `S - k x E` replaces the equity of the target with the new equity of the group. The model gives goodwill a required stable funding factor of 0%.
+**Deferred tax assets** (rows 41 to 43). Total DTAs and DTCs come from CC2. The DTCs do not rely on future profitability. They are not deducted from CET1.
+The remaining DTAs (about 0.40bn for NBG) are below the deduction threshold (CC1 row 75, 250% risk weight) and are in CET1 already.
+The lever in rows 28 and 29 adds them to CET1 a second time. It is off by default (N16 = 0).
 
-**MREL.** Resources = both KM2 amounts + change of own funds + new MREL instruments.
-The requirement is the TREA-weighted mix of both requirements. The combined buffer is added.
-A bank with no KM2 enters with total capital as resources. A target with no requirement uses the requirement of the acquirer.
+**Regulatory view** (rows 90 to 128).
+- P2R and the countercyclical and systemic risk buffers are weighted by RWAs. The G-SII or O-SII buffer is the higher of the two.
+- CET1 requirement = 4.5% + P2R (CET1 part) + combined buffer. Tier 1 uses 6%. Total capital uses 8%.
+- Distance to MDA = the smallest headroom of the three layers, in basis points of RWAs. Row 107 names the binding layer.
+- Leverage exposure = both exposures + change of cash. Leverage ratio = Tier 1 / exposure.
+- LCR = (HQLA of both banks + change of cash) / net outflows of both banks.
+- NSFR: ASF of both banks + new instruments + shares issued - k x common equity of the target; RSF is the sum of both.
+- MREL requirement = RWA-weighted mix of the KM2 requirements, plus the combined buffer.
+- AT1, Tier 2, and senior surplus (rows 122 to 124) use the requirement stack of CRR Article 104a (P2R: 56.25% CET1, 18.75% AT1, 25% Tier 2).
 
-**IRRBB.** The model adds the changes of economic value of both banks in each scenario.
-It divides the sum by the pro-forma Tier 1 capital. The supervisory limit is 15%.
+**Issuance needs and requirements weighted by RWAs** (rows 169 to 201, tab Issuance needs).
+- The requirement of the combination is the average of the requirements of the two banks, weighted by their RWAs (the RWAs of NBG and of the target after the RWA change, as in row 8). This applies to the CET1, Tier 1, and total capital requirement (P2R and combined buffer),
+  to the MREL requirement with the combined buffer, and to the subordination requirement. Rows 91 to 102 weight the P2R and buffers too, but they take the higher of the two systemic buffers (row 97). The weighted average of rows 173 to 177 is the simple version.
+- A need is the amount to issue. It follows a waterfall: CET1 first, then Tier 1 (AT1), then Tier 2, then eligible liabilities. An instrument that is issued for one layer also counts for the next layers.
+  At the requirements the need is the shortfall against requirement x RWAs (rows 187 to 192). At the targets it is the shortfall against the CET1 target D1 and the MREL target D2 (rows 193 to 195).
+- CET1 of the combination (row 20) already carries the goodwill. A cash payment reduces CET1 one for one. A share payment leaves it unchanged, because the new goodwill is deducted against the new equity. Rows 199 to 201 show the goodwill, its effect in basis points of RWAs, and the CET1 change compared with NBG alone.
+- The AT1, Tier 2, and eligible liabilities of the target stay outstanding and count in the group stack (rows 22 to 24 and 154 and 155). N19 sets the share that counts (default 100%).
+  Rows 196 to 198 show the need at the MREL target if none of them counted, and the mitigation. A caution: the instruments of a subsidiary count at group level in part (CRR Articles 83 to 88),
+  and as external MREL only if the subsidiary is a resolution entity. Otherwise they are internal MREL. Test this with N19.
 
-**Encumbrance and non-performing loans.** The model adds the amounts of both banks and divides.
+**Buckets for AT1 and Tier 2** (rows 203 to 222). CRR Article 104a lets a bank meet the P2R with at most 18.75% AT1 and 25% Tier 2 (56.25% must be CET1). The largest AT1 bucket is the Pillar 1 AT1 (1.5%) plus 18.75% of the P2R.
+The largest Tier 2 bucket is 2% plus 25% of the P2R. The P2R is the P2R weighted by RWAs (row 92). Rows 212 and 213 give the room that is left in each bucket, and rows 214 and 215 the instruments above the buckets (they count for the MREL, not for the capital requirement).
+Rows 216 to 222 give the mix to issue, cheapest first: AT1 and Tier 2 within the buckets, the rest of a capital need as CET1, senior non-preferred for the subordination need, and senior preferred for the rest of the MREL need.
 
-**Capacity.** The page shows the largest cash payment and the largest price multiple that keep the CET1 ratio at or above your floor.
-CET1 falls one for one with cash, so two model runs give both limits.
+**Subordination requirement** (rows 177, 182, and 191, levers N20 to N22). P3DH shows it: KM2 rows EU-8 and EU-10 give the part of the MREL requirement to be met with own funds or subordinated liabilities, as % of TREA and of TEM.
+- 156 of 200 banks fill EU-8. 111 file a value above 0. All 22 banks of EUR 250bn and more, and 16 of 19 banks of EUR 100bn to 250bn that file KM2, report one.
+  Median of the filed values: 19.1% (above EUR 250bn) and 15.9% (EUR 100bn to 250bn) of TREA. 13.50% is the most frequent value of the banks of EUR 100bn to 250bn (AIB, Bank of Ireland, Belfius, BNP Paribas, Erste, Rabobank). It is probably the rule for banks above EUR 100bn.
+  I could not check the legal text here. Check it with the resolution authority. Filed values on the exposure measure (EU-10) are 5.0% to 8.2%.
+- NBG files 0% in EU-8. BIL, Eurobank, Piraeus, and Bank of Cyprus leave it empty.
+- The model uses the filed values (weighted by RWAs) when a bank files one. When none is filed and the combination has assets of N21 or more (default EUR 100bn), it uses N20 (default 13.5% of TREA) plus the combined buffer.
+  The requirement in EUR is not below N22 (default 5%) of the leverage exposure. NBG and BIL together have assets of EUR 113bn, so the assumption applies. Set N20 to 0 to remove it.
 
-**Size class.** The model adds total assets, the change of cash, and new goodwill, and removes the intangible assets of the target. It applies the same limits as the classification
-(10 bn, 100 bn, and 250 bn euro).
+**MREL detail** (rows 153 to 159). Senior non-preferred and senior preferred, the subordinated resources (own funds + senior non-preferred) as % of RWAs,
+the subordination requirement of KM2 (zero for these banks), and the headroom.
+
+**IRRBB** (rows 130 to 143). The change of economic value of both banks is added in each scenario and divided by Tier 1. The supervisory limit is 15%.
+
+## Merger: formulas (four years)
+
+The layout follows Figure 89. Capital is in EUR bn. Profit is in EUR m. The deal terms come from Calc.
+
+- Cost synergies = target costs x cost synergy % x phase-in. Revenue synergies = target revenues x revenue synergy % x phase-in.
+- Restructuring = restructuring % x run-rate cost synergies, after tax, in 2026E.
+- Deal financing = cash paid x expected deposit rate of the year x (1 - tax rate).
+- Total net profit = NBG profit + k x target profit + deal effects.
+- NBG shares = net profit / EPS (consensus). New shares come from Calc. New share total is the sum.
+- CET1 new = NBG CET1 (organic) + target CET1 less price paid + value of shares issued + minority interest, fair value, and costs + cumulative retained profit of the target and the deal.
+  NBG CET1 in 2026E is the reported CET1 of the data quarter. Later years add retained profit (1 - payout ratio).
+- RWAs = NBG RWAs + target RWAs (each grows at its own rate) + RWA optimisation + purchase accounting adjustment.
+- Clean P/E = NBG price / pro forma EPS. P/TNAV = NBG price x new share total / pro forma tangible equity. RoTE = total net profit / pro forma tangible equity.
+- Earnings impact = pro forma EPS / EPS before the deal - 1. TNAV per share impact compares tangible equity per share with and without the deal.
+- Return on investment = (target profit + after-tax synergies + deal financing) / price. It excludes restructuring.
+- A year with consensus uses it (net income, revenue, revenue less operating profit as cost). A year without consensus grows from the year before (profit: growth input, costs and revenue: cost growth input).
+  A target without consensus in year 1 (BIL, HCOB) starts from the net income of the last 12 months and the opex of the last fiscal year. Revenue = costs / cost-income ratio (input).
+  Bank of Cyprus has consensus for 3 years. Year 4 grows from year 3.
+
+## The review of the original sheet
+
+Sheet Review lists each finding and a table of every typed number. The main findings:
+
+1. New shares were divided by NBG market cap instead of the NBG price. They were overstated by 11%.
+2. The share split of BIL and HCOB was blank, so no shares were issued.
+3. The case NBG at 13% CET1 paid out excess CET1 but kept market cap and profit. This created a price gain of 13% from nothing.
+4. Cash paid did not reduce market cap. A cash deal looked almost free.
+5. Profit counted at the stake, but price, cash, CET1 and RWAs counted at 100%.
+6. Tangible equity of BIL and BoC was accounting equity less AT1, without deducting intangible assets.
+7. The tax rate was 25% for every bank. The model uses the statutory rate of each bank (Bloomberg, sheet Market).
+8. The deposit rate of 3% is near the OIS-based averages of the later years. It is too high for the current year, in which the realised rates are lower.
+9. The DTA lever added 0.4bn that is already in CET1 (P3DH, CC1 and CC2).
+10. BIL and HCOB had profit, opex, tax rate, and valuation as typed numbers without a source. All come from P3DH or Bloomberg now.
+
+Effect on the upside for NBG holders (market cap method): +15.8% (BIL), +11.0% (BoC), +15.1% (HCOB) in the original sheet.
+With the corrections, the data of P3DH and Bloomberg, and the year 2027E, the upside is much lower: see the Review sheet, which shows each step.
+Valuation of BIL and HCOB: your sheet used 0.926x tangible equity for BIL (EUR 2.2bn) and EUR 2.5bn for HCOB. The sheet Calc (rows 160 to 167) shows the value of the nearest peers on tangible equity, on CET1, and on average.
 
 ## Limits
 
-- The model is static. It has no earnings, no synergies over time, and no dividend.
-- The model does not value the core deposit intangible. This item does not change CET1 in this method.
-- Deferred tax assets and deferred tax liabilities of the deal are not modelled.
-- The supervisor sets the real P2R, buffers, and MREL requirement of the combined group. The model uses a mix.
+- The model shows one year (Calc) and four years (Merger). It does not model dividends in detail, DTC amortisation, or deposit flows.
+- Consensus for the last year has few brokers. The net profit and EPS consensus of that year do not always match, so the share count that follows from them can jump.
+- The issuance needs use the pro forma stack of the combination. The instruments of the target count in full unless N19 is lower (see above).
+- The assumed subordination requirement is a rule of thumb from the filings of other banks, not a decision of a resolution authority.
+- The senior surplus counts all CET1 towards MREL. CET1 used for the combined buffer does not count. The surplus is too high by the combined buffer.
+- HCOB files no KM2 or TLAC1 in P3DH, so its MREL line has capital only.
+- The valuation of a bank without listed shares is the median multiple of listed peers. BIL and HCOB are not traded. A real price depends on a negotiation.
+  The two bases differ clearly for both banks. A different k (10 to 30) moves the value of BIL by less than 10%.
+- For HCOB the net income of the last fiscal year and of the last 12 months differ clearly (sheet Market). The model uses the last 12 months. Check which one fits the case.
+- Opex, revenue, and net income of a bank without consensus are values of the last fiscal year or the last 12 months. They are not forecasts. The growth inputs extend them.
+- The statutory tax rate is the rate on the law. The effective rates of BIL and HCOB differ much from it (sheet Market). The model uses the statutory rate.
+- The Bloomberg data is a pull of one day. The page warns when it is older than 7 days.
+- The size of the DTC lever (N16) and the waived dividend (D29) are scenario inputs.
 - Liquidity can be trapped in a subsidiary. The model pools it.
-- KM1 amounts of two banks can come from two different quarters. The page shows a note in this case.
-- AE1 and CC1 are annual for many banks. The page names each input that comes from an older filing.
-- Foreign targets: P3DH converts amounts to euro at the exchange rate of the filing date.
 
-## Test
-
-`scripts/test_ma_model.py` tests the formulas with made-up banks (share deal, cash deal, bargain purchase, minority interest,
-funding, capacity limits). It then runs NBG with 6 real targets on the database.
+## How to refresh
 
 ```
-.venv/Scripts/python scripts/test_ma_model.py
+.venv/Scripts/python scripts/refresh_p3dh.py                 # P3DH data and clean layer
+C:\Users\E40889\Documents\blauto\.venv\Scripts\python scripts/pull_bloomberg.py rates      # Bloomberg (terminal must run). See docs/bloomberg_db.md
+dashboard/.venv/Scripts/python scripts/build_ma_workbook.py   # docs/M&A calc v2.xlsx
+dashboard/.venv/Scripts/python scripts/test_ma_workbook.py    # tests (the check with the library formulas needs: pip install formulas)
+dashboard/.venv/Scripts/python scripts/test_bbg.py            # tests of the Bloomberg modules
 ```
+The page reads the database. New data shows on the page after a reload.

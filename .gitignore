@@ -53,3 +53,6 @@ screenshots/
 NUL
 Thumbs.db
 Desktop.ini
+
+# Workbooks. The M&A workbooks hold Bloomberg data and must not be published.
+docs/*.xlsx
