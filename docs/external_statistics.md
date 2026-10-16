@@ -9,14 +9,23 @@ The data is free. It needs no terminal and no key.
 
 | Source | Dataset | What it holds | Frequency | Countries |
 |---|---|---|---|---|
-| ECB Data Portal | MIR | Rates of banks: new business and outstanding loans, deposits | monthly, from 1999 | euro area members |
-| ECB Data Portal | BSI | Balance sheet of the banks of a country: stocks of loans and deposits by sector, and growth rates | monthly, from 1999 | EU countries (most series: euro area members) |
+| ECB Data Portal | MIR | Rates of banks: new business and outstanding loans, deposits | monthly, from 1999 | 28 areas: the euro area members, and the 6 non-euro countries in their own currency (from 2004 or 2005) |
+| ECB Data Portal | BSI | Balance sheet of the banks of a country: stocks, growth rates, and flows of loans and deposits by sector. Counterpart: the euro area, split into the country itself and the other euro area countries | monthly, from 1999 | EU countries (most series: euro area members) |
 | ECB Data Portal | BLS | Bank lending survey: credit standards and loan demand (net percentage of banks) | quarterly, from 2003 | euro area members |
 | ECB Data Portal | CBD2 | Consolidated banking data of domestic banks: profit and loss, ratios, assets, capital, asset quality | annual and quarterly, from 2007 | EU countries |
 | ECB Data Portal | SUP | Supervisory banking statistics of all supervised banks: return on equity, margin, cost-to-income, LCR, NPL, leverage ratio | quarterly, from 2015 | euro area members |
 | ECB Data Portal | SSI | Structure of the banking sector: number of banks, employees, concentration | annual, from 1999 | EU countries |
+| ECB Data Portal | RAI | Risk assessment indicators of the banking sector: lending margins on new loans, share of interbank loans, leverage ratio, loan-to-deposit ratio, share of variable rate loans, funding structure | monthly and quarterly | EU countries (a few series for each country) |
+| ECB Data Portal | IRS | 10-year government bond yield (convergence criterion) of each country, and money market rates in local currency | monthly | yields: all EU countries; money market rate: CZ, HU, PL, RO |
+| ECB Data Portal | RESR, RESH | Residential property prices (index and growth) and structural housing indicators, whole country | quarterly, annual | EU countries |
+| ECB Data Portal | CLIFS, CISS | Country-level index of financial stress; composite indicator of systemic stress (euro area) and of sovereign stress (large countries) | monthly, daily | CLIFS: all EU countries; CISS: the euro area and about 15 countries |
 | ECB Data Portal | EST, FM | Euro short-term rate, 3-month Euribor, deposit facility rate | daily, monthly | euro area |
 | Eurostat | prc_hpi_q, namq_10_gdp, une_rt_m, prc_hicp_minr, gov_10q_ggdebt | House prices, GDP, unemployment, inflation, government debt | quarterly, monthly | EU countries |
+| Eurostat | irt_st_m, irt_lt_mcby_m | 3-month money market rate (countries with their own currency), 10-year government bond yield | monthly | money market rate: BG, CZ, DK, HR, HU, PL, RO, SE; yield: all EU countries |
+| Eurostat | tipspd22, tipspd20, ei_bsco_m, nasq_10_f_bs | Household debt and private sector debt (% of GDP), consumer confidence, deposits and loans of households and of companies (financial accounts) | annual, monthly, quarterly | EU countries |
+| EBA | EU-wide Transparency Exercise (TE2025) | Bank-by-bank data of 119 banks: P&L, capital, leverage, assets, liabilities, sovereign exposures by country, market risk, credit risk and asset quality by country and sector | quarterly: 30 Sep 2024 to 30 Jun 2025 | 25 EU and EEA countries (see "EBA Transparency Exercise") |
+
+Data sets that were checked and are not loaded: SEC (securities issues: the ECB data stops in March 2022), KRI (EBA key risk indicators on the ECB portal: 24 aggregate series that end in Q2-2024), and SAFE (survey of SMEs on access to finance: large, no data for Luxembourg).
 
 Domestic banks (CBD2) are the banks that have their head office in the country. A foreign bank in the country is not in these numbers.
 In a country where foreign banks dominate, the domestic banks are a small part of the sector (see "Limits of the benchmark").
@@ -26,10 +35,15 @@ In a country where foreign banks dominate, the domestic banks are a small part o
 | Command | What it loads | Use |
 |---|---|---|
 | `pull_ext.py all` | 60 curated indicators with readable names (for example `mir_cob_nfc`), from 2010 | Quick start and the views `v_country_growth` and `v_country_spreads` |
-| `pull_ext.py bulk` | Every series of MIR, BSI, BLS, CBD2, SUP, and SSI, with the full history | Benchmark, pass-through, and any new question |
+| `pull_ext.py bulk` | Every series of MIR, BSI, BLS, CBD2, SUP, SSI, RAI, IRS, RESR, RESH, CLIFS, and CISS, with the full history | Benchmark, pass-through, and any new question |
+| `pull_ext.py eba` | The EBA Transparency Exercise (4 CSV files, about 230 MB) | Bank-by-bank P&L and exposures (see "EBA Transparency Exercise") |
 
-The bulk pull stores about 110,000 series and 5.5 million observations. The catalogue of a data set gives titles and units. One request for each country gives the observations.
-BSI is limited to the sector "monetary financial institutions excluding the central bank", counterparts in the euro area, all currencies, and stocks and growth rates (not flows).
+The database holds about 129,000 series and 8.9 million observations after the bulk pull and the curated pull. The catalogue of a data set gives titles and units. One request for each country gives the observations.
+The ECB server sometimes answers with HTTP 504 or a timeout. The fetch function waits 5, 20, and 60 seconds and tries again. A country or a data set that still fails is reported, and the other data sets go on.
+To load a failed part again, run `pull_ext.py bulk --flows RAI --areas LV,LU,SE`.
+BSI is limited to the sector "monetary financial institutions excluding the central bank", all currencies, and the counterpart areas U2 (the euro area), U6 (the country itself), and U5 (the other euro area countries). It holds stocks, growth rates, and flows.
+Lending to residents outside the euro area is not in BSI. For a country such as Luxembourg this is a large part of the balance sheet, so a loan mix from BSI is biased.
+RESR and RESH keep only the series of the whole country (REGION `_T`): the regional series are not comparable between countries.
 A series that the curated pull stored keeps its curated indicator name. A new series gets its concept as the indicator name.
 
 ## Tables
@@ -111,7 +125,17 @@ The euro area betas are in the expected ranges. A household overnight deposit fo
 
 Limits:
 - A beta mixes the change of the rate with the change of the mix of the business (new business in a month can be small in a small country).
-- The rates exist for the members of the euro area. A country that joined late has fewer cycles.
+- The euro area cycles above apply to the members of the euro area. A country that joined late has fewer cycles.
+
+### Countries with their own currency (CZ, DK, HU, PL, RO, SE)
+
+These countries have their own rate cycles. `pass_through_local` (in `modules/ext/analytics.py`) uses, for each country:
+- the 3-month money market rate of the country as market rate (Eurostat `irt_st_m`, indicator `es_mm_3m`);
+- the bank rates in the local currency (the euro concept with the currency of the country, for example `MIR/B.L21.A.R.A.2250.PLN.N`);
+- cycles from the turning points of the local rate: a leg is a move of at least 1 point between a trough and a peak, measured on the average of 3 months.
+The cycle name holds its dates, for example `hike 2021-06..2022-07 (local)`. The last leg can be a cycle that is not finished.
+The betas of these countries cannot be compared by cycle name with the euro area, and a group beta is not weighted (the stocks are in local currency).
+`scripts/pass_through.py` computes both sets and stores them in the table `ext_passthrough`.
 - A group beta is the mean weighted by the stock of the sector at the start of the cycle. A group with 2 or 3 countries is sensitive to one country.
 
 ## Benchmark of a bank
@@ -138,6 +162,7 @@ A Bloomberg value can be in the Excel file. Keep the file out of the repository.
 | Net interest income, interest income, interest expense, net fees, and operating income, each divided by assets | OR2 (3 years in each filing) | CBD2 I2410, I2411, I2412, I2430, I2400 |
 | Net interest income and net fees as a share of operating income | OR2 | CBD2 I2510, I2530 |
 | Return on equity and on assets | Bloomberg, last fiscal year | CBD2 I2003, I2004 |
+| Cost-to-income, impairment of financial assets / assets, return on assets, return on equity (fiscal year 2024) | EBA Transparency Exercise: P&L of 31 Dec 2024, assets and equity at the end of the year | CBD2 I2100, I2006, I2004, I2003 |
 
 ### Columns of the result
 
@@ -176,6 +201,31 @@ The list is in `modules/ext/specs.py`. The names tell the group:
 - `estr_daily`, `euribor_3m`, `ecb_dfr`: market rates of the euro area.
 - `es_*`: Eurostat.
 
+## EBA Transparency Exercise
+
+The EBA published the exercise TE2025 in December 2025. The reference dates are 30 Sep 2024, 31 Dec 2024, 31 Mar 2025, and 30 Jun 2025. The last data point is 30 Jun 2025.
+The EBA says that the exercise is discontinued and that the Pillar 3 Data Hub (P3DH) replaces it. No later release is expected.
+P3DH has more recent capital, liquidity, and exposure data (to 30 Jun 2026). The exercise adds what P3DH lacks: a full P&L, for the fiscal year 2024 and the first half of 2025.
+
+| Table | Content |
+|---|---|
+| `te_oth` | Sheets Capital, Leverage, Assets, Liabilities, P&L, and RWA OV1. Amounts in EUR million. |
+| `te_sov` | Sovereign exposures by country of the issuer and by maturity band. |
+| `te_mrk` | Market risk: risk exposure amounts by product and approach. |
+| `te_cre` | Credit risk by exposure class, by country, and by sector (NACE), non-performing and forborne exposures, collateral. About 650,000 rows. |
+
+- Columns are those of the EBA files in lower case (`Row` is `row_no`, `Column` is `col_no`), plus `period_end` (last day of the quarter) and `vintage` (`TE2025`). The key of a line is its `label` (and `item`), `sheet`, and the dimension columns of the file.
+- The P&L amounts are year to date. `n_quarters` says how many quarters the amount covers: 4 at 31 December, 2 at 30 June. A ratio must not mix periods with different `n_quarters`.
+- The sample is 119 banks at the highest level of consolidation (108 with a P&L), 25 EU and EEA countries. The four banks of the M&A model are in it. A bank is identified by its LEI.
+- The numbers tie to P3DH. For BIL at 31 Dec 2024 the exercise gives CET1 of 1,561.8 and risk exposure of 10,970.0, the same as KM1 of P3DH.
+- The ratios agree with the ECB. For the fiscal year 2024, NBG and Alpha Bank are in the exercise. Their return on equity (13.7% and 7.9%), return on assets (1.54% and 0.90%), and cost-to-income ratio (37.0% and 38.7%) bracket the ECB figures for the domestic banks of Greece in CBD2 (11.7%, 1.21%, and 36.3%).
+- The files are public EBA data. They are stored in `data/raw/eba_te/TE2025/` (not in git).
+
+```
+python scripts/pull_ext.py eba                  download the 4 files (about 230 MB) and load them
+python scripts/pull_ext.py eba --flows oth,sov  chosen files only
+```
+
 ## How to run
 
 ```
@@ -196,7 +246,9 @@ The database grows by about 0.5 GB after the first bulk pull. Run `PRAGMA wal_ch
 
 - Use the growth rates of the ECB (`growth_*`) for loans and deposits. The growth computed from the stocks (`v_country_growth`) is affected by reclassifications, sales of loans, and exchange rates.
   The stocks of countries outside the euro area are not comparable: Romania shows growth of more than 100% from a change of coverage.
-- MIR, BLS, and SUP exist for the members of the euro area only. CBD2, SSI, and Eurostat cover all 27 countries.
+- BLS and SUP exist for the members of the euro area only. CBD2, SSI, and Eurostat cover all 27 countries.
+- MIR also holds the non-euro countries (CZ, DK, HU, PL, RO, SE), but their rates are in the local currency. The concept of a series ends with the currency, so a join on a euro concept leaves them out.
+  The pass-through and the benchmark use euro concepts only, so they do not cover these 6 countries yet. A pass-through for them needs a local reference rate (the ECB set IRS holds money market rates in local currency).
 - The source holds back some values for confidentiality. They are not stored. For small countries the significant banks are often blank in SUP. The BSI sectors differ between countries for the same reason.
 - The ECB shows costs with a minus sign: the cost-to-income ratio and the interest expense ratio are negative in CBD2. The cost-to-income ratio is positive in SUP.
 - Python cannot check the certificate of Eurostat in this setup. The loader runs `curl` (`modules/ext/http.py`) and keeps the certificate check on.

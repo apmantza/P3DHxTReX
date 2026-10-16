@@ -131,5 +131,16 @@ SPECS: list[Spec] = [
     es("es_unemployment", "une_rt_m", "s_adj=SA&age=TOTAL&sex=T&unit=PC_ACT", "M", "pct", "economy", "Unemployment rate, seasonally adjusted"),
     es("es_inflation", "prc_hicp_minr", "unit=RCH_A&coicop18=TOTAL", "M", "pct", "economy", "Inflation (HICP), annual rate of change"),
     es("es_gov_debt", "gov_10q_ggdebt", "sector=S13&na_item=GD&unit=PC_GDP", "Q", "pct", "economy", "General government gross debt, % of GDP"),
+    # ---- Eurostat, market rates of the countries (the local reference rate of the countries outside the euro area, and the government yield of every country)
+    es("es_mm_3m", "irt_st_m", "int_rt=IRT_M3", "M", "pct", "market", "3-month money market rate (euro area members: no series; use euribor_3m)"),
+    es("es_lt_yield", "irt_lt_mcby_m", "int_rt=MCBY", "M", "pct", "market", "10-year government bond yield (convergence criterion)"),
+    # ---- Eurostat, households and companies
+    es("es_hh_debt", "tipspd22", "unit=PC_GDP", "A", "pct", "economy", "Household debt, consolidated, % of GDP"),
+    es("es_private_debt", "tipspd20", "unit=PC_GDP", "A", "pct", "economy", "Private sector debt (companies and households), consolidated, % of GDP"),
+    es("es_consumer_conf", "ei_bsco_m", "indic=BS-CSMCI&s_adj=SA&unit=BAL", "M", "balance", "economy", "Consumer confidence indicator, seasonally adjusted (balance)"),
+    es("es_hh_deposits", "nasq_10_f_bs", "sector=S14_S15&finpos=ASS&na_item=F2&unit=MIO_EUR", "Q", "eur_m", "economy", "Households: currency and deposits (assets), EUR million"),
+    es("es_hh_loans", "nasq_10_f_bs", "sector=S14_S15&finpos=LIAB&na_item=F4&unit=MIO_EUR", "Q", "eur_m", "economy", "Households: loans (liabilities), EUR million"),
+    es("es_nfc_deposits", "nasq_10_f_bs", "sector=S11&finpos=ASS&na_item=F2&unit=MIO_EUR", "Q", "eur_m", "economy", "Non-financial corporations: currency and deposits (assets), EUR million"),
+    es("es_nfc_loans", "nasq_10_f_bs", "sector=S11&finpos=LIAB&na_item=F4&unit=MIO_EUR", "Q", "eur_m", "economy", "Non-financial corporations: loans (liabilities), EUR million"),
 ]
 BY_INDICATOR = {s.indicator: s for s in SPECS}

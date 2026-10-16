@@ -10,6 +10,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -185,9 +187,15 @@ def test_bulk() -> None:
     dims, cat = bulk.read_catalogue("MIR", fake_bulk)
     check("catalogue: dimensions are the columns between KEY and TIME_PERIOD; a non-EU country is left out", dims == ["FREQ", "REF_AREA", "BS_ITEM"] and len(cat) == 3 and not any(".US." in k for k in cat), f"{dims} {list(cat)}")
     dims_b, cat_b = bulk.read_catalogue("BSI", fake_bulk)
-    check("catalogue of BSI: a flow series (data type 4) is left out", len(cat_b) == 1 and ".1.U2." in next(iter(cat_b)), str(list(cat_b)))
+    check("catalogue of BSI: stocks and flows (data type 4) are both kept", len(cat_b) == 2 and any(".4.U2." in k for k in cat_b) and any(".1.U2." in k for k in cat_b), str(list(cat_b)))
     check("request for a country: the country at its place, the fixed dimensions of the flow, the first year", bulk.area_url("MIR", dims, "LU", 1999).endswith("/MIR/.LU.?startPeriod=1999&detail=dataonly&format=csvdata"), bulk.area_url("MIR", dims, "LU", 1999))
-    check("request for BSI: the fixed dimensions (monthly, sector A, counterpart area U2, all currencies) at their places", "/BSI/M.LU..A....U2..Z01.?" in bulk.area_url("BSI", dims_b, "LU", 2000), bulk.area_url("BSI", dims_b, "LU", 2000))
+    check("request for BSI: the fixed dimensions (monthly, sector A, counterpart areas U2, U5, and U6, all currencies) at their places", "/BSI/M.LU..A....U2+U5+U6..Z01.?" in bulk.area_url("BSI", dims_b, "LU", 2000), bulk.area_url("BSI", dims_b, "LU", 2000))
+    cat_r = "\n".join(["KEY,FREQ,REF_AREA,REGION,TIME_PERIOD,OBS_VALUE,TITLE", "RESR.Q.AT._T,Q,AT,_T,2026-Q2,100,Whole country", "RESR.Q.AT.EC,Q,AT,EC,2026-Q2,100,National excluding capital city",
+                       "RESR.Q.AT.AT130,Q,AT,AT130,2026-Q2,100,Wien"]) + "\n"
+    _, kept = bulk.read_catalogue("RESR", lambda url: cat_r)
+    check("RESR: only the series of the whole country (REGION _T) are kept; regions and the capital city are left out", list(kept) == ["RESR.Q.AT._T"], str(list(kept)))
+    new_flows = {"RAI", "IRS", "RESR", "RESH", "CLIFS", "CISS"}
+    check("the new ECB data sets are in the bulk list (risk indicators, yields and money market rates, property prices, housing, stress); SEC is not (it stops in March 2022)", new_flows <= set(bulk.BULK) and "SEC" not in bulk.BULK)
 
     conn = new_db()
     conn.execute("INSERT INTO ext_series (source, series_key, indicator, ref_area, freq) VALUES ('ecb', 'MIR.M.LU.A2I', 'mir_cob_nfc', 'LU', 'M')")  # a curated series
@@ -268,6 +276,12 @@ def test_analytics() -> None:
         an.MIN_MOVE_BY_CYCLE.clear()
         an.MIN_MOVE_BY_CYCLE.update(saved)
     check("a cycle that is not finished needs a smaller market move: a move of 0.25 gives a beta only to it", np.isnan(e["finished"]) and near(e["to date"], 0.5), str(e))
+    # cycles from turning points
+    zig = pd.Series([2.0, 2.0, 2.0, 2.5, 3.0, 3.6, 4.2, 4.6, 5.0, 5.0, 5.0, 4.6, 4.0, 3.4, 2.8, 2.2, 1.8, 1.7, 1.7, 1.7], index=_months("2020-01", 20))
+    legs = an.detect_cycles(zig, 1.0)
+    check("detect_cycles: a rise from 2.0 to 5.0 and a fall to 1.7 are two legs (hike, cut), at the turning points of the average of 3 months", [k for _, _, k in legs] == ["hike", "cut"] and legs[0][0] <= "2020-04" and "2020-10" <= legs[0][1] <= "2020-12" and legs[1][0] == legs[0][1], str(legs))
+    check("detect_cycles: a move below the swing is no cycle; an empty or flat series gives none", an.detect_cycles(pd.Series([2.0, 2.2, 2.4, 2.1, 2.3, 2.0, 2.2]), 1.0) == [] and an.detect_cycles(pd.Series([], dtype=float), 1.0) == [])
+    check("detect_cycles: a fall first and then a rise (cut, hike)", [k for _, _, k in an.detect_cycles(pd.Series((7 - zig).tolist()), 1.0)] == ["cut", "hike"])
     check("the table ext_passthrough is written", conn.execute("SELECT COUNT(*) FROM ext_passthrough").fetchone()[0] == len(df))
     try:
         an.pass_through(new_db(), cycles=cycles)
@@ -306,6 +320,17 @@ def test_analytics() -> None:
     r = gb.iloc[0]
     check("group beta: median of AA 0.5, BB 0, CC 1.0 is 0.5; mean 0.5; the weighted mean uses the stocks (AA 100, CC 300; BB has none): (0.5 x 100 + 1 x 300) / 400 = 0.875",
           r["n"] == 3 and near(r["median"], 0.5) and near(r["mean"], 0.5) and near(r["wmean"], 0.875), str(r.to_dict()))
+    # non-euro countries: PL in zloty, the local reference rate from Eurostat, the cycles from its own turning points
+    conn.executemany("INSERT OR IGNORE INTO ext_country VALUES (?, ?, 0, ?, ?)", [("PL", "Poland", "PL", "PL")])
+    local = dict(zip(_months("2020-01", 20), zig.tolist()))
+    _put(conn, "es_mm_3m", "es_mm_3m", "PL", local)
+    pl_rate = rate_concept.replace(".EUR.", ".PLN.")
+    _put(conn, "x", pl_rate, "PL", {p: 0.4 * v for p, v in local.items()})
+    _put(conn, "x", rate_concept, "PL", {p: 9.9 for p in local})  # a euro series of the country must not be used
+    lp = an.pass_through_local(conn, products={product: an.PRODUCTS[product]})
+    check("pass-through of a non-euro country: uses the zloty series (beta 0.4 in the hike and in the cut) against the local rate; the cycle name holds its dates and '(local)'",
+          len(lp) == 2 and set(lp.country) == {"PL"} and all(near(b, 0.4, 1e-6) for b in lp.beta) and all("(local)" in c for c in lp.cycle) and lp.concept.str.contains("PLN").all(), str(lp[["cycle", "beta"]].to_dict("records")))
+    check("pass-through of a non-euro country: a country without a local rate (CZ) gives no row", "CZ" not in set(lp.country))
 
 
 P3DH_TABLES = """
@@ -411,12 +436,16 @@ def test_benchmark() -> None:
     check("loan growth: bank 8,000 against 6,400 = +25%; the ECB stock of LU 1,000 against 909 = +10%; bank less country = 15", near(g["bank"], 25) and near(g["country"], 10) and near(g["bank_less_country"], 15), str(g.to_dict()))
     g2 = bk.loan_growth(conn, c["nonbank_loans"], "LU", None, bk.LOAN_STOCK.format(sector="2000")).iloc[0]
     check("loan growth of non-bank loans: bank 6,500 against 5,200 = +25%", near(g2["bank"], 25), str(g2.to_dict()))
+    _put(conn, "x", bk.LOAN_TOTAL, "DE", {"2025-12": 1200.0, "2024-12": 1000.0}, "M")  # +20%
+    _put(conn, "x", bk.LOAN_TOTAL, "RO", {"2025-12": 500.0, "2024-12": 250.0}, "M")  # +100%: the stocks of a country with its own currency are not comparable
+    g3 = bk.loan_growth(conn, c["gross_loans"], "LU", None).iloc[0]
+    check("loan growth: the median is over the euro area members only (LU +10%, DE +20% give 15; Romania +100% is left out, with it the median would be 20)", near(g3["euro_median"], 15) and "eu_median" not in g3.index, str(g3.to_dict()))
 
     # rate sensitivity: NII of 100m for five banks, and one bank with 10m that is left out
     def irr(key: str, nii_m: float, up: float, down: float, date: str = "2026-06-30") -> None:
         if key != "B1":  # B1 has its OR2 above (NII 100m)
             _fact(conn, key, "2025-12-31", "K_19.02", "0030", "0010", nii_m * 1.5e6)
-            _fact(conn, key, "2025-12-31", "K_19.02", "0040", "0010", -nii_m * 0.5e6)
+            _fact(conn, key, "2025-12-31", "K_19.02", "0040", "0010", (1 if key in ("B2", "B4") else -1) * nii_m * 0.5e6)  # B2 and B4 file the expense with a positive sign, as most banks do
         _fact(conn, key, date, "K_68.00", "0010", "0030", up * 1e6)
         _fact(conn, key, date, "K_68.00", "0020", "0030", down * 1e6)
     conn.execute("INSERT INTO v_entity_class VALUES ('B9', 'Bank nine', 'France')")
@@ -424,6 +453,8 @@ def test_benchmark() -> None:
                                        ("B5", 100, 3, -3, "2025-12-31"), ("B6", 10, 9, -9, "2026-06-30"), ("B9", 100, 50, -50, "2024-12-31")):
         irr(key, nii_m, up, down, date)
     ir = bm.irrbb_position(conn, "B1")
+    check("IRRBB: the sign of the interest expense in OR2 does not matter (B2 and B4 file it positive, 100m of NII for all): without ABS the NII of B2 would be 200m and its figure half the size",
+          near(bm.irrbb_position(conn, "B2")["bank"]["up"], 1.0) and near(bm.irrbb_position(conn, "B4")["bank"]["down"], -1.0), str(bm.irrbb_position(conn, "B2").get("bank")))
     check("IRRBB: 5 banks with NII of 100m (B6 with 10m is left out; B5 counts with its filing of 6 months before; B9 with a filing of 24 months before is left out); B1 gains 2% for +200 and loses 8% for -200",
           ir["n_banks"] == 5 and ir["first_date"] == "2025-12-31" and near(ir["bank"]["up"], 2.0) and near(ir["bank"]["down"], -8.0), str(ir))
     check("IRRBB: median of the country (B1, B2): +1.5 / -6; of the euro area (all 5): +3 / -3; of all: +3 / -3", near(ir["country"]["up"], 1.5) and near(ir["country"]["down"], -6) and ir["country"]["n"] == 2
@@ -500,6 +531,83 @@ def test_real_database() -> None:
         check("every beta of the euro area is between -0.2 and 1.5", all(-0.2 <= b <= 1.5 for b in pt.values() if b == b), str({k: v for k, v in pt.items() if v == v and not -0.2 <= v <= 1.5}))
 
 
+def _te_csv(columns: list[str], rows: list[list]) -> str:
+    import csv
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf, quoting=csv.QUOTE_NONNUMERIC)
+    w.writerow(columns)
+    w.writerows(rows)
+    return buf.getvalue()
+
+
+def test_eba_te() -> None:
+    import tempfile
+    from pathlib import Path
+    from modules.ext import bank_metrics as bm, benchmark as bk, eba_te
+    print("6b. EBA Transparency Exercise: loader and the ratios of the P&L")
+
+    def row(lei, period, sheet, label, amount, nq=4, fv=0, st=0):
+        return [lei, "LU", period, 1, label, fv, st, 0, 0, amount, 0, nq, 1, 1, sheet]
+
+    pl = [("Interest income", 1000.0), ("Interest expenses", 600.0), ("Net Fee and commission income", 200.0), ("TOTAL OPERATING INCOME_ NET", 1000.0), ("(Administrative expenses)", 400.0),
+          ("(Cash contributions to resolution funds and deposit guarantee schemes)", 20.0), ("(Depreciation)", 80.0),
+          ("(Impairment or (-) reversal of impairment on financial assets not measured at fair value through profit or loss)", 30.0), ("PROFIT OR (-) LOSS FOR THE YEAR", 150.0)]
+    rows = [row("B1", 202412, "P&L", lab, v) for lab, v in pl]
+    rows += [row("B1", 202506, "P&L", "TOTAL OPERATING INCOME_ NET", 400.0, nq=2), row("B1", 202506, "P&L", "(Administrative expenses)", 200.0, nq=2), row("B1", 202506, "P&L", "(Depreciation)", 40.0, nq=2)]
+    rows += [row("B1", 202412, "Assets", "Total Assets", 20000.0), row("B1", 202412, "Assets", "Total Assets", 999.0, fv=1), row("B1", 202412, "Liabilities", "TOTAL EQUITY", 2000.0)]
+    sov = [["B1", "LU", 202412, 2520811, "Total carrying amount", "DE", 0, 1, 55.5, 12, 3, "Sovereign"]]
+    files = {"tr_oth.csv": _te_csv(eba_te.CSV_COLUMNS["oth"], rows), "tr_sov.csv": _te_csv(eba_te.CSV_COLUMNS["sov"], sov)}
+    calls: list[str] = []
+
+    def fetcher(url: str, dest) -> None:
+        calls.append(url)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(files[url.rsplit("/", 1)[1]], encoding="utf-8")
+
+    quiet = lambda *_: None  # noqa: E731
+    with tempfile.TemporaryDirectory() as tmp:
+        conn = new_db()
+        res = eba_te.load(conn, files=("oth", "sov"), cache=Path(tmp), fetcher=fetcher, log=quiet)
+        check("loader: both files are downloaded once and loaded (all rows of each)", res == {"oth": len(rows), "sov": 1} and len(calls) == 2 and calls[0].endswith("/Full_database/883401/tr_oth.csv"), f"{res} {calls}")
+        r = conn.execute("SELECT lei, period, period_end, vintage, label, amount, row_no, col_no, sheet FROM te_oth WHERE label = 'Total Assets' AND assets_fv = 0").fetchone()
+        check("loader: columns are renamed (lei, row_no, col_no), the period gets its last day, the vintage is stored", r == ("B1", 202412, "2024-12-31", "TE2025", "Total Assets", 20000.0, 1, 1, "Assets"), str(r))
+        check("loader: the sovereign file is stored with its country", conn.execute("SELECT country, maturity, amount, period_end FROM te_sov").fetchone() == ("DE", 1, 55.5, "2024-12-31"))
+        eba_te.load(conn, files=("oth", "sov"), cache=Path(tmp), fetcher=fetcher, log=quiet)
+        check("loader: a second run reads the cached files (no new download) and does not duplicate the rows", len(calls) == 2 and conn.execute("SELECT COUNT(*) FROM te_oth").fetchone()[0] == len(rows))
+        check("loader: the run is logged for each file", conn.execute("SELECT COUNT(*) FROM ext_pull_log WHERE source = 'eba' AND status = 'ok'").fetchone()[0] == 4)
+        (Path(tmp) / "TE2025" / "tr_mrk.csv").write_text("LEI_Code,NSA\nB1,LU\n", encoding="utf-8")
+        try:
+            eba_te.load(conn, files=("mrk",), cache=Path(tmp), fetcher=fetcher, log=quiet)
+            raised = False
+        except ValueError as e:
+            raised = "columns missing" in str(e)
+        check("loader: a file without the expected columns raises an error", raised)
+        for what, kw in (("a vintage", {"vintage": "TE1999"}), ("a file", {"files": ("zzz",)})):
+            try:
+                eba_te.load(conn, cache=Path(tmp), fetcher=fetcher, log=quiet, **kw)
+                raised = False
+            except ValueError:
+                raised = True
+            check(f"loader: {what} that does not exist raises an error", raised)
+
+        m = bm.te(conn, "B1")
+        p = "2024-12-31"
+        check("EBA ratios: cost-to-income = -(400 + 80 + 20) / 1000 = -50%; impairment / assets = -30 / 20,000 = -0.15%; ROA = 150 / 20,000 = 0.75%; ROE = 150 / 2,000 = 7.5%",
+              near(m["cost_to_income"][p], -50) and near(m["impairment_to_assets"][p], -0.15) and near(m["roa_te"][p], 0.75) and near(m["roe_te"][p], 7.5), str(m))
+        check("EBA ratios: a period with 2 quarters (30 Jun) gives no ratio, and the assets rows of a fair value stage are not the total", set(m["roa_te"]) == {p} and set(m["cost_to_income"]) == {p}, str(m))
+        check("EBA ratios: a bank that is not in the file, or a database without the table, gives nothing", all(not v for v in bm.te(conn, "nobody").values()) and bm.te(new_db(), "B1") == {})
+        keys = ("cost_to_income", "impairment_to_assets", "roa_te", "roe_te")
+        items = [bk.BY_KEY[k].concept.split(".")[-8] for k in keys]
+        check("benchmark: the 4 metrics are compared with the ECB items I2100, I2006, I2004, I2003 (annual series)", items == ["I2100", "I2006", "I2004", "I2003"] and all(bk.BY_KEY[k].freq == "A" for k in keys), str(items))
+        pull.seed_countries(conn)
+        _put(conn, "x", bk.BY_KEY["cost_to_income"].concept, "LU", {"2024": -60.0}, "A")
+        _put(conn, "x", bk.BY_KEY["cost_to_income"].concept, "DE", {"2024": -70.0}, "A")
+        c = bk.compare(conn, bk.BY_KEY["cost_to_income"], m["cost_to_income"], "LU").iloc[0]
+        check("benchmark: cost-to-income of the bank (-50) against the country (-60) and the EU median of 2 countries (-65): the same sign convention, the bank costs less (rank 100%)",
+              near(c["country"], -60) and near(c["eu_median"], -65) and near(c["bank_less_country"], 10) and c["eu_rank"] == 100.0, str(c.to_dict()))
+
+
 def main() -> int:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     test_helpers()
@@ -508,6 +616,7 @@ def main() -> int:
     test_bulk()
     test_analytics()
     test_benchmark()
+    test_eba_te()
     test_real_database()
     if FAILED:
         print(f"\n{len(FAILED)} check(s) failed: " + "; ".join(FAILED))

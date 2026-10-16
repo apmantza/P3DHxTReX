@@ -24,10 +24,22 @@ from .pull import ECB_URL, ISO, period_end, seed_countries
 from .specs import ECB_AREAS
 
 # the dimensions to fix in the request (smaller answers) and a test that a series must pass
+def national(r: dict) -> bool:
+    """A property series of the whole country (REGION _T): the regional and capital city series are not comparable between countries."""
+    return r.get("REGION") == "_T"
+
+
 BULK: dict[str, dict] = {
     "MIR": {}, "BLS": {}, "SSI": {}, "SUP": {}, "CBD2": {},
-    # balance sheet of the banks: sector MFIs excluding the central bank, counterparts of the euro area, all currencies together, monthly; stocks and growth rates (the transactions say the same)
-    "BSI": {"fixed": {"FREQ": "M", "BS_REP_SECTOR": "A", "COUNT_AREA": "U2", "CURRENCY_TRANS": "Z01"}, "keep": lambda r: r.get("DATA_TYPE") != "4"},
+    # balance sheet of the banks: sector MFIs excluding the central bank, monthly, all currencies together; stocks, growth rates, and transactions (flows).
+    # Counterpart area: the euro area (U2) and its two parts, the country itself (U6) and the other euro area countries (U5). Lending outside the euro area is not in this data set.
+    "BSI": {"fixed": {"FREQ": "M", "BS_REP_SECTOR": "A", "COUNT_AREA": "U2+U5+U6", "CURRENCY_TRANS": "Z01"}},
+    "RAI": {},  # risk assessment indicators of the banking sector: lending margins, interbank share, leverage, loan-to-deposit, funding structure
+    "IRS": {},  # long-term government bond yields (convergence criterion) and money market rates in local currency
+    "RESR": {"keep": national},  # residential property prices (index and growth), whole country
+    "RESH": {"keep": national},  # structural housing indicators, whole country
+    "CLIFS": {},  # country-level index of financial stress
+    "CISS": {},  # composite indicator of systemic stress (euro area) and of sovereign stress (large countries)
 }
 UNIT_MULT = {"EUR": 0}
 

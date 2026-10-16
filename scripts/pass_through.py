@@ -6,7 +6,8 @@
   python scripts/pass_through.py --product deposits       only the products whose name starts with this text
   python scripts/pass_through.py --xlsx betas.xlsx        write the table to Excel
 Beta = (change of the bank rate) / (change of the 3-month Euribor) from the start to the end of a rate cycle (see modules/ext/analytics.py).
-Run scripts/pull_ext.py bulk first (the history of the bank rates) and scripts/pull_ext.py all --only euribor_3m --since 1999.
+The 6 countries with their own currency (CZ, DK, HU, PL, RO, SE) use their local money market rate and cycles from its turning points.
+Run scripts/pull_ext.py bulk first (the history of the bank rates) and scripts/pull_ext.py all --only euribor_3m,es_mm_3m --since 1999.
 """
 
 from __future__ import annotations
@@ -36,18 +37,22 @@ def main() -> int:
     ap.add_argument("--xlsx", default=None)
     args = ap.parse_args()
     conn = sqlite3.connect(args.db, timeout=600)
-    df = analytics.pass_through(conn, store=not args.no_store)
+    df = pd.concat([analytics.pass_through(conn, store=False), analytics.pass_through_local(conn)], ignore_index=True)
+    if not args.no_store:
+        df.to_sql("ext_passthrough", conn, if_exists="replace", index=False)
+        conn.commit()
     if args.product:
         df = df[df["product"].str.startswith(args.product)]
     pd.set_option("display.width", 250)
     pd.set_option("display.max_columns", 30)
     pd.set_option("display.max_rows", 500)
     print(f"{len(df)} betas: {df.country.nunique()} countries, {df['product'].nunique()} products, {df.cycle.nunique()} cycles")
-    cycles = list(analytics.CYCLES)
     countries = [c for c in args.country.split(",") if c] or ([] if args.group else ["U2"])
     for c in countries:
+        x = df[df.country == c]
+        cycles = list(analytics.CYCLES) if c not in analytics.NON_EURO else list(x.sort_values("start").cycle.unique())  # a country with its own currency has its own cycles
         print(f"\n{c}: beta by product and cycle")
-        print(df[df.country == c].pivot(index="product", columns="cycle", values="beta").reindex(columns=cycles).round(2).to_string())
+        print(x.pivot(index="product", columns="cycle", values="beta").reindex(columns=cycles).round(2).to_string())
     if args.group:
         gb = analytics.group_betas(conn, df, args.group)
         print(f"\n{args.group}: beta by product and cycle (n = countries; wmean = mean weighted by the stock at the start of the cycle)")

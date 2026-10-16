@@ -51,6 +51,10 @@ METRICS = [
     Metric("fee_to_income", "Net fees / operating income", _cbd("I2530"), "A"),
     Metric("roe", "Return on equity", _cbd("I2003"), "A"),
     Metric("roa", "Return on assets", _cbd("I2004"), "A"),
+    Metric("cost_to_income", "Cost-to-income ratio (EBA Transparency Exercise; costs negative as in the ECB data)", _cbd("I2100"), "A"),
+    Metric("impairment_to_assets", "Impairment of financial assets / assets (EBA Transparency Exercise)", _cbd("I2006"), "A"),
+    Metric("roa_te", "Return on assets (EBA Transparency Exercise)", _cbd("I2004"), "A"),
+    Metric("roe_te", "Return on equity (EBA Transparency Exercise)", _cbd("I2003"), "A"),
 ]
 BY_KEY = {m.key: m for m in METRICS}
 
@@ -182,9 +186,10 @@ def loan_mix(conn: sqlite3.Connection, bank_mix: dict[str, float], country: str,
 
 def loan_growth(conn: sqlite3.Connection, gross_loans: dict[str, float], country: str, groups: dict[str, list[str]] | None, concept: str = LOAN_TOTAL) -> pd.DataFrame:
     """Annual growth of the loans of the bank (CR1) against the growth of the loan stock of the banks of the country (BSI, loans to residents of the euro area, the concept says which sectors),
-    at the same month. The stocks are not adjusted for reclassifications and exchange rates."""
+    at the same month. The stocks are not adjusted for reclassifications and exchange rates.
+    The median is over the euro area members only (column euro_median): the stocks of the other EU countries are not comparable (Romania shows +61%)."""
     x = _stock_cross(conn, concept)
-    eu = members(conn, "EU27")
+    eu = members(conn, "Euro area (members)")
     rows = []
     for period, value in sorted(gross_loans.items()):
         before = f"{int(period[:4]) - 1}{period[4:]}"
@@ -193,10 +198,10 @@ def loan_growth(conn: sqlite3.Connection, gross_loans: dict[str, float], country
         m, m0 = _month(period), _month(before)
         row = {"period": period, "bank": (value / gross_loans[before] - 1) * 100}
         if x.empty or m not in x.index or m0 not in x.index:
-            rows.append({**row, "country": np.nan, "euro_area": np.nan, "eu_median": np.nan, "bank_less_country": np.nan})
+            rows.append({**row, "country": np.nan, "euro_area": np.nan, "euro_median": np.nan, "bank_less_country": np.nan})
             continue
         g = (x.loc[m] / x.loc[m0] - 1) * 100
-        row.update({"country": g.get(country, np.nan), "euro_area": g.get("U2", np.nan), "eu_median": g[[c for c in eu if c in g.index]].median()})
+        row.update({"country": g.get(country, np.nan), "euro_area": g.get("U2", np.nan), "euro_median": g[[c for c in eu if c in g.index]].median()})
         for name, cs in (groups or {}).items():
             row[name] = g[[c for c in cs if c in g.index]].median()
         row["bank_less_country"] = row["bank"] - row["country"] if row["country"] == row["country"] else np.nan

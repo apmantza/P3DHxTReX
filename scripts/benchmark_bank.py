@@ -63,7 +63,7 @@ def main() -> int:
     show(r["loan_mix_non_bank"], f"Loans by counterparty, without loans to credit institutions and central banks {note}", mix_cols)
     if not r["loan_growth"].empty:
         for measure, g in r["loan_growth"].groupby("measure", sort=False):
-            show(g.drop(columns=["measure"]), f"Growth of the {measure}, year on year (the ECB figures are loan stocks of the banks of the country: not adjusted for reclassifications)", ["period", *ORDER])
+            show(g.drop(columns=["measure"]), f"Growth of the {measure}, year on year (loan stocks of the banks of the country, not adjusted for reclassifications; the median is over the euro area members)", ["period", "bank", "country", "euro_area", "euro_median"])
     ir = r["irrbb"]
     if ir:
         print(f"\nChange of net interest income, as a percent of net interest income (P3DH: bank at {ir['date']}, peers from {ir['first_date']}; {ir['n_banks']} banks with net interest income of EUR 50m or more)")

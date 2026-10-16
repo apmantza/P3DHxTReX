@@ -2,7 +2,8 @@
 
   monthly(conn, concept)                         monthly series of one concept, one column for each country
   aggregate(conn, concept, group, weight)        a geographic group: weighted mean, simple mean, median, minimum, maximum, number of countries
-  pass_through(conn)                             for each country, product, and rate cycle: the share of the change of the market rate that the retail rate follows (beta)
+  pass_through(conn)                             for each euro area country, product, and rate cycle: the share of the change of the market rate that the retail rate follows (beta)
+  pass_through_local(conn)                       the same for the 6 countries with their own currency, with the local money market rate and cycles from its turning points
   group_betas(df, group)                         betas of a group
 The pass-through measure is the cumulative beta of a cycle: (change of the retail rate) / (change of the 3-month Euribor), each between the start and the end of the cycle.
 A rate is the average of 3 months, which removes the noise of a single month. A cycle in which the market rate moves less than half a point has no beta
@@ -86,6 +87,25 @@ def _avg3(s: pd.Series, month: str) -> float:
     return float(s.iloc[i - 2:i + 1].mean())
 
 
+def _beta(rs: pd.Series, m: pd.Series, start: str, end: str, min_move: float) -> tuple | None:
+    """(rate at the start, rate at the end, market at the start, market at the end, beta, months until half of the move) or None when the data does not cover the cycle.
+    rs is the retail rate and m the market rate, both on the months of m."""
+    if start not in rs.index or end not in rs.index or rs.reindex([start, end]).isna().any():
+        return None
+    r0, r1, m0, m1 = _avg3(rs, start), _avg3(rs, end), _avg3(m, start), _avg3(m, end)
+    if np.isnan([r0, r1, m0, m1]).any():
+        return None
+    dm = m1 - m0
+    beta = (r1 - r0) / dm if abs(dm) >= min_move else float("nan")
+    half = float("nan")
+    if abs(r1 - r0) > 1e-9 and not np.isnan(beta):
+        path = rs.loc[start:end].rolling(3).mean().dropna()
+        hit = (path - r0) / (r1 - r0)
+        hit = hit[hit >= 0.5]
+        half = float(rs.index.get_loc(hit.index[0]) - rs.index.get_loc(start)) if len(hit) else float("nan")
+    return r0, r1, m0, m1, beta, half
+
+
 def pass_through(conn: sqlite3.Connection, reference: str = "euribor_3m", cycles: dict | None = None, products: dict | None = None, store: bool = True) -> pd.DataFrame:
     """Cumulative betas by country, product, and cycle. Writes the table ext_passthrough when store is true."""
     cycles, products = cycles or CYCLES, products or PRODUCTS
@@ -99,25 +119,79 @@ def pass_through(conn: sqlite3.Connection, reference: str = "euribor_3m", cycles
         for country in x.columns:
             rs = x[country].reindex(m.index).interpolate(limit_area="inside")  # the retail rate on the months of the market rate; a gap inside the history is filled
             for cycle, (start, end) in cycles.items():
-                if start not in rs.index or end not in rs.index or rs.reindex([start, end]).isna().any():
-                    continue
-                r0, r1, m0, m1 = _avg3(rs, start), _avg3(rs, end), _avg3(m, start), _avg3(m, end)
-                if np.isnan([r0, r1, m0, m1]).any():
-                    continue
-                dm = m1 - m0
-                beta = (r1 - r0) / dm if abs(dm) >= MIN_MOVE_BY_CYCLE.get(cycle, MIN_MOVE) else float("nan")
-                half = float("nan")
-                if abs(r1 - r0) > 1e-9 and not np.isnan(beta):
-                    path = rs.loc[start:end].rolling(3).mean().dropna()
-                    hit = ((path - r0) / (r1 - r0))
-                    hit = hit[hit >= 0.5]
-                    half = float(rs.index.get_loc(hit.index[0]) - rs.index.get_loc(start)) if len(hit) else float("nan")
-                rows.append((country, product, concept, cycle, start, end, r0, r1, m0, m1, beta, half))
+                b = _beta(rs, m, start, end, MIN_MOVE_BY_CYCLE.get(cycle, MIN_MOVE))
+                if b is not None:
+                    rows.append((country, product, concept, cycle, start, end, *b))
     df = pd.DataFrame(rows, columns=["country", "product", "concept", "cycle", "start", "end", "rate_start", "rate_end", "market_start", "market_end", "beta", "months_to_half"])
     if store:
         df.to_sql("ext_passthrough", conn, if_exists="replace", index=False)
         conn.commit()
     return df
+
+
+NON_EURO = {"CZ": "CZK", "DK": "DKK", "HU": "HUF", "PL": "PLN", "RO": "RON", "SE": "SEK"}  # EU countries with their own currency
+LOCAL_SWING = 1.0  # points of the local reference rate that make a cycle
+
+
+def detect_cycles(rate: pd.Series, min_swing: float = LOCAL_SWING) -> list[tuple[str, str, str]]:
+    """Turning points of a monthly rate: (start month, end month, 'hike' or 'cut'). A leg is a move of at least min_swing points between a trough and a peak (or the other way)
+    on the average of 3 months. The last leg ends at the last extreme of the data, so it can be a cycle that is not finished."""
+    x = rate.dropna().rolling(3).mean().dropna()
+    if len(x) < 2:
+        return []
+    idx, v = list(x.index), x.values
+    lo = hi = 0
+    trend, pivots = 0, [0]
+    for i in range(1, len(v)):
+        if trend == 0:
+            if v[i] > v[hi]:
+                hi = i
+            if v[i] < v[lo]:
+                lo = i
+            if v[i] - v[lo] >= min_swing:
+                pivots, trend, hi = [lo], 1, i
+            elif v[hi] - v[i] >= min_swing:
+                pivots, trend, lo = [hi], -1, i
+        elif trend == 1:
+            if v[i] > v[hi]:
+                hi = i
+            if v[hi] - v[i] >= min_swing:
+                pivots.append(hi)
+                trend, lo = -1, i
+        else:
+            if v[i] < v[lo]:
+                lo = i
+            if v[i] - v[lo] >= min_swing:
+                pivots.append(lo)
+                trend, hi = 1, i
+    if trend != 0:
+        pivots.append(hi if trend == 1 else lo)
+    return [(idx[a], idx[b], "hike" if v[b] > v[a] else "cut") for a, b in zip(pivots, pivots[1:]) if idx[b] > idx[a]]
+
+
+def pass_through_local(conn: sqlite3.Connection, min_swing: float = LOCAL_SWING, products: dict | None = None) -> pd.DataFrame:
+    """Betas of the countries outside the euro area. The market rate is the 3-month money market rate of the country (indicator es_mm_3m), the bank rates are the series in the local currency
+    (the euro concept with the currency of the country), and the cycles come from the turning points of the local rate (detect_cycles). The cycle name holds its dates, for example
+    'hike 2021-06..2022-07 (local)'. The stocks of the weights are in local currency and not comparable, so group betas of these countries are not weighted."""
+    products = products or PRODUCTS
+    mkt = monthly(conn, "", "es_mm_3m")
+    rows = []
+    for country, ccy in NON_EURO.items():
+        if country not in mkt.columns:
+            continue
+        m = mkt[country].dropna()
+        legs = detect_cycles(m, min_swing)
+        for product, (euro_concept, _) in products.items():
+            concept = euro_concept.replace(".EUR.", f".{ccy}.")
+            x = monthly(conn, concept)
+            if country not in x.columns:
+                continue
+            rs = x[country].reindex(m.index).interpolate(limit_area="inside")
+            for start, end, kind in legs:
+                b = _beta(rs, m, start, end, min_swing)
+                if b is not None:
+                    rows.append((country, product, concept, f"{kind} {start}..{end} (local)", start, end, *b))
+    return pd.DataFrame(rows, columns=["country", "product", "concept", "cycle", "start", "end", "rate_start", "rate_end", "market_start", "market_end", "beta", "months_to_half"])
 
 
 def group_betas(conn: sqlite3.Connection, df: pd.DataFrame, group: str, weighted: bool = True) -> pd.DataFrame:

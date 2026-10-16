@@ -4,6 +4,7 @@
   or2(conn, key)       income ratios of each year (OR2: three years in one filing)
   cr1(conn, key)       NPL ratio, gross loans, loans to non-banks, and loans by counterparty of each filing (CR1, sheet .a)
   bloomberg(conn, key) return on equity and on assets of the last fiscal year
+  te(conn, key)        cost-to-income, impairment, return on assets and on equity of the fiscal years 2024 (EBA Transparency Exercise, loaded with pull_ext.py eba)
   irrbb_position(conn, key)  change of net interest income for +200 and -200 basis points, as a share of net interest income, against all banks of P3DH
 A function returns {metric: {period: value}}. The period is the end of a quarter (KM1, CR1) or of a year (OR2, Bloomberg).
 Assets of the income ratios are the interest-earning assets of OR2 (row 1c). The ECB divides by total assets, so the ratios of the bank are a little high.
@@ -102,10 +103,48 @@ def bloomberg(conn: sqlite3.Connection, key: str) -> dict[str, dict[str, float]]
     return out
 
 
+TE_PNL = {  # label in the P&L sheet of the EBA Transparency Exercise -> name
+    "Interest income": "interest_income", "Interest expenses": "interest_expense", "Net Fee and commission income": "fees", "TOTAL OPERATING INCOME_ NET": "income",
+    "(Administrative expenses)": "admin", "(Cash contributions to resolution funds and deposit guarantee schemes)": "resolution", "(Depreciation)": "depreciation",
+    "(Impairment or (-) reversal of impairment on financial assets not measured at fair value through profit or loss)": "impairment",
+    "PROFIT OR (-) LOSS FOR THE YEAR": "profit",
+}
+
+
+def te(conn: sqlite3.Connection, key: str) -> dict[str, dict[str, float]]:
+    """Ratios of the last full fiscal years from the EBA Transparency Exercise (table te_oth; empty when the bank or the table is missing). Only a December date with 4 quarters counts:
+    the P&L amounts are year to date. Assets and equity are at the end of the year. Costs carry the minus sign of the ECB data: cost-to-income and the impairment ratio are negative."""
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'te_oth'").fetchone():
+        return {}
+    marks = ",".join("?" * len(TE_PNL))
+    pnl = conn.execute(f"""SELECT period_end, label, amount FROM te_oth WHERE lei = ? AND sheet = 'P&L' AND n_quarters = 4 AND substr(period_end, 6, 5) = '12-31' AND label IN ({marks})
+                           AND amount IS NOT NULL ORDER BY vintage""", (key, *TE_PNL)).fetchall()
+    bal = conn.execute("""SELECT period_end, label, amount FROM te_oth WHERE lei = ? AND substr(period_end, 6, 5) = '12-31' AND amount IS NOT NULL AND
+                          ((sheet = 'Assets' AND label = 'Total Assets' AND assets_fv = 0 AND assets_stages = 0) OR (sheet = 'Liabilities' AND label = 'TOTAL EQUITY'))
+                          ORDER BY vintage""", (key,)).fetchall()
+    years: dict[str, dict[str, float]] = {}
+    for period, label, amount in pnl:
+        years.setdefault(period, {})[TE_PNL[label]] = amount
+    for period, label, amount in bal:
+        years.setdefault(period, {})["assets" if label == "Total Assets" else "equity"] = amount
+    out: dict[str, dict[str, float]] = {m: {} for m in ("cost_to_income", "impairment_to_assets", "roa_te", "roe_te")}
+    for period, r in sorted(years.items()):
+        if r.get("income", 0) > 0 and all(k in r for k in ("admin", "depreciation")):
+            out["cost_to_income"][period] = -(abs(r["admin"]) + abs(r["depreciation"]) + abs(r.get("resolution", 0.0))) / r["income"] * 100
+        if r.get("assets", 0) > 0:
+            if "impairment" in r:
+                out["impairment_to_assets"][period] = -r["impairment"] / r["assets"] * 100
+            if "profit" in r:
+                out["roa_te"][period] = r["profit"] / r["assets"] * 100
+        if r.get("equity", 0) > 0 and "profit" in r:
+            out["roe_te"][period] = r["profit"] / r["equity"] * 100
+    return out
+
+
 def all_metrics(conn: sqlite3.Connection, key: str) -> dict:
     """Every ratio of the bank by metric name and period, and the CR1 items (gross loans, loan mix)."""
     c = cr1(conn, key)
-    ratios = {**km1(conn, key), **or2(conn, key), "npl_ratio": c["npl_ratio"], **bloomberg(conn, key)}
+    ratios = {**km1(conn, key), **or2(conn, key), "npl_ratio": c["npl_ratio"], **bloomberg(conn, key), **te(conn, key)}
     return {"ratios": {m: v for m, v in ratios.items() if v}, "gross_loans": c["gross_loans"], "nonbank_loans": c["nonbank_loans"], "loan_mix": c["loan_mix"]}
 
 
@@ -133,7 +172,8 @@ def irrbb_position(conn: sqlite3.Connection, key: str, groups: dict[str, list[st
     euro = {i for (i,) in conn.execute("SELECT iso2 FROM ext_country WHERE euro_area = 1")}
     irr = conn.execute("""SELECT entity_key, reference_date, row_code, value FROM clean_fact WHERE template_code = 'K_68.00' AND column_code = '0030' AND row_code IN ('0010', '0020')
                           AND quality <> 'quarantined' AND value IS NOT NULL""").fetchall()
-    nii_rows = conn.execute("""SELECT entity_key, reference_date, SUM(value) FROM clean_fact WHERE template_code = 'K_19.02' AND column_code = '0010' AND row_code IN ('0030', '0040')
+    nii_rows = conn.execute("""SELECT entity_key, reference_date, SUM(CASE WHEN row_code = '0030' THEN value ELSE -ABS(value) END) FROM clean_fact  -- an expense is an expense whatever its sign in the filing: 164 of 204 banks file it positive
+                               WHERE template_code = 'K_19.02' AND column_code = '0010' AND row_code IN ('0030', '0040')
                                AND quality <> 'quarantined' AND sheet = '' AND key_descriptor = '' AND value IS NOT NULL GROUP BY entity_key, reference_date HAVING COUNT(*) = 2""").fetchall()
     nii: dict[str, list[tuple[str, float]]] = {}
     for k, ref, v in nii_rows:
