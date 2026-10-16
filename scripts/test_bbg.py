@@ -104,6 +104,33 @@ def test_bonds() -> None:
     check("a name that Bloomberg cut still matches (Luxemb, Luxembourg)", bonds.same_issuer("Banque Internationale a Luxemb", "Banque Internationale a Luxembourg SA"))
     check("accents and legal forms do not matter", bonds.same_issuer("Banque Internationale à Luxembourg", "BANQUE INTERNATIONALE A LUXEMBOURG S.A.") and bonds.same_issuer("National Bank of Greece, S.A.", "National Bank of Greece SA"))
 
+    from modules.bbg.client import Client, LimitReached
+
+    class Err:  # the error element of a Bloomberg answer
+        def __init__(self, **kw):
+            self.kw = kw
+
+        def hasElement(self, name: str) -> bool:
+            return name in self.kw
+
+        def getElementAsString(self, name: str) -> str:
+            return self.kw[name]
+
+    try:
+        Client._response_error(Err(message="Workflow review needed. [nid:21937] ", category="LIMIT", code="-4002"))
+        limit_ok = False
+    except LimitReached as e:
+        limit_ok = "-4002" in str(e) and "DAPI" in str(e)
+    check("Bloomberg data limit: category LIMIT stops the pull with LimitReached, although the text has no limit word", limit_ok)
+    other = Client._response_error(Err(message="Invalid request", category="BAD_ARGS", code="-1"))
+    check("another response error is a plain RuntimeError, not a limit", isinstance(other, RuntimeError) and not isinstance(other, LimitReached))
+    try:
+        Client._response_error(Err(message="You have exceeded the monthly data limit"))
+        text_ok = False
+    except LimitReached:
+        text_ok = True
+    check("a limit that Bloomberg describes in words (no category) still stops the pull", text_ok)
+
 
 def test_bond_market() -> None:
     print("3b. bond market data")
@@ -247,7 +274,8 @@ def entity_rows(conn: sqlite3.Connection) -> None:
     conn.execute("INSERT INTO bbg_equity_snapshot VALUES ('LIST FP', 'INDUSTRY_SUBGROUP', '2026-10-13', 'Commer Banks Non-US')")
     conn.execute("INSERT INTO clean_period_fact VALUES ('LEI_SELF_00000000001', '2026-06-30', 'K_61.00', 10, '0010', 8000000000.0)")
     snap = [("SELF GA", "PX_LAST", "2026-10-13", 16.0), ("SELF GA", "CRNCY", "2026-10-13", "EUR"), ("SELF GA", "EQY_SH_OUT", "2026-10-13", 900.0),
-            ("SELF GA", "TANG_BOOK_VAL_PER_SH", "2026-10-13", 10.0), ("SELF GA", "TRAIL_12M_EPS", "2026-10-13", 1.2), ("SELF GA", "INDUSTRY_SUBGROUP", "2026-10-13", "Commer Banks Non-US"),
+            ("SELF GA", "TANG_BOOK_VAL_PER_SH", "2026-10-13", 10.0), ("SELF GA", "BOOK_VAL_PER_SH", "2026-10-13", 12.0), ("SELF GA", "PX_TO_BOOK_RATIO", "2026-10-13", 16.0 / 12.0),
+            ("SELF GA", "TRAIL_12M_EPS", "2026-10-13", 1.2), ("SELF GA", "INDUSTRY_SUBGROUP", "2026-10-13", "Commer Banks Non-US"),
             ("GRP IM", "PX_LAST", "2026-10-13", 5.0), ("GRP IM", "INDUSTRY_SUBGROUP", "2026-10-13", "Diversified Banking Inst"),
             ("CONG HK", "PX_LAST", "2026-10-13", 20.0), ("CONG HK", "INDUSTRY_SUBGROUP", "2026-10-13", "Computers"),
             ("CAR GR", "PX_LAST", "2026-10-13", 80.0), ("CAR GR", "INDUSTRY_SUBGROUP", "2026-10-13", "Auto-Cars/Light Trucks")]
@@ -259,6 +287,118 @@ def entity_rows(conn: sqlite3.Connection) -> None:
     cons += [("SELF GA", "2026-10-13", "1FY", None, "BEST_SALES", 3200.0)]
     conn.executemany("INSERT INTO bbg_consensus VALUES (?, ?, ?, ?, ?, ?)", cons)
     conn.commit()
+
+
+def test_issuance() -> None:
+    print("3e. issuance: debt type, public or private, buckets, workbook")
+    from modules.bbg import issuance, issuance_xlsx
+
+    check("programme: mixed-case series are one programme; an empty or numeric series is none", issuance.programme("EmtN") == "EMTN" and issuance.programme("emt1") == "EMTN" and issuance.programme("GMTN") == "GMTN"
+          and issuance.programme("") == "" and issuance.programme("0000") == "" and issuance.programme(None) == "" and issuance.programme("*") == "")
+    dt_ = issuance.debt_type
+    check("debt type: capital layers first (AT1 by designation or rank, Tier 2 by designation or rank)", dt_("Jr Subordinated", None, None, "FIXED", None, "") == issuance.AT1
+          and dt_("Sr Unsecured", "Additional Tier 1", None, None, None, "") == issuance.AT1 and dt_("Subordinated", None, None, None, None, "EMTN") == issuance.T2 and dt_(None, "Tier 2", None, None, None, "") == issuance.T2)
+    check("debt type: senior non-preferred, covered (collateral), senior preferred", dt_("Sr Non Preferred", None, "SR NON-PREFERRED", "ZERO COUPON", None, "EMTN") == issuance.SNP
+          and dt_("Secured", None, "COVERED", "FLOATING", None, "") == issuance.COVERED and dt_("Sr Preferred", None, "SR PREFERRED", "FIXED", None, "EMTN") == issuance.SP)
+    check("debt type: a senior unsecured note is a programme note only with a plain coupon, in a programme, and without conversion",
+          dt_("Sr Unsecured", None, None, "FIXED", "AT MATURITY", "EMTN") == issuance.SENIOR and dt_("Sr Unsecured", None, None, "VARIABLE", "CALLABLE", "EMTN") == issuance.SENIOR
+          and dt_("Sr Unsecured", None, None, "ZERO COUPON", "AT MATURITY", "EMTN") == issuance.STRUCTURED and dt_("Sr Unsecured", None, None, "STEP CPN", None, "EMTN") == issuance.STRUCTURED
+          and dt_("Sr Unsecured", None, None, "FIXED", "CONVERTIBLE", "EMTN") == issuance.STRUCTURED and dt_("Sr Unsecured", None, None, "FIXED", "CONV/CALL", "EMTN") == issuance.STRUCTURED
+          and dt_("Sr Unsecured", None, None, "FIXED", "AT MATURITY", "") == issuance.STRUCTURED)
+    check("public or private: a programme note is public; a standalone note is public from EUR 150m; below, or of unknown size, it is private",
+          issuance.placement("EMTN", 1e6)[0] == "Public" and issuance.placement("", 150e6)[0] == "Public" and issuance.placement("", 149.9e6)[0] == "Private" and issuance.placement("", None)[0] == "Private")
+    check("size buckets", [issuance.size_bucket(x) for x in (5e6, 10e6, 49e6, 50e6, 149e6, 150e6, None)] == ["below 10", "10 to 50", "10 to 50", "50 to 150", "50 to 150", "150 or more", ""])
+    check("bucket keys: ten single years, one open bucket, and perpetual", [issuance.bucket_key(y, 2026) for y in (2026, 2035, 2036, 2064, None)] == [2026, 2035, 2036, 2036, issuance.PERPETUAL_KEY]
+          and [lab for _, lab in issuance.bucket_labels(2026)][-3:] == ["2035", "2036+", "Perpetual"])
+    cp, mat, perp = issuance.parse_name("BBB 5<7/8> 06/28/2035 REGS<corp>")
+    cp0, mat0, perp0 = issuance.parse_name("BBB 0 PERP<corp>")
+    cp1, mat1, perp1 = issuance.parse_name("BBB<corp>")
+    check("names: coupon with a fraction, date, perpetual, and a name without coupon", (cp, mat, perp) == (5.875, dt.date(2035, 6, 28), False) and (cp0, mat0, perp0) == (0.0, None, True) and (cp1, mat1, perp1) == (None, None, False))
+    check("to EUR: EUR as is, schilling at the fixed rate, another currency by the rate, an unknown currency has no value", issuance.to_eur(10.0, "EUR", {}) == 10.0 and abs(issuance.to_eur(13.7603, "ATS", {}) - 1.0) < 1e-12
+          and issuance.to_eur(12.0, "USD", {"USD": 1.2}) == 10.0 and issuance.to_eur(5.0, "XXX", {}) is None)
+
+    today = dt.date(2026, 10, 16)
+    conn = new_db()
+    conn.execute("INSERT INTO bbg_rate_daily VALUES ('FX_EURUSD', '2026-10-14', 1.2)")
+    cols = "security, lei, isin, payment_rank, basel_iii, collateral_type, coupon, coupon_type, maturity, next_call, perpetual, currency, amt_issued, amt_outstanding, maturity_type, series, pulled_at"
+    rows = [
+        ("SP<corp>", "L1", "XS1", "Sr Preferred", None, "SR PREFERRED", 3.0, "FIXED", "2030-05-01", None, "N", "EUR", 500e6, 500e6, "AT MATURITY", "EmtN", "2026-10-14"),
+        ("SNP<corp>", "L1", "XS2", "Sr Non Preferred", None, "SR NON-PREFERRED", 4.0, "FIXED", "2031-05-01", "2030-05-01", "N", "EUR", 300e6, 300e6, "CALLABLE", "EMTN", "2026-10-14"),
+        ("T2BIG<corp>", "L1", "XS3", "Subordinated", "Tier 2", "SUBORDINATED", 6.0, "FIXED", "2035-01-01", None, "N", "EUR", 200e6, 200e6, "AT MATURITY", "", "2026-10-14"),
+        ("T2SML<corp>", "L1", "XS4", "Subordinated", "Tier 2", "SUBORDINATED", 6.0, "FIXED", "2036-01-01", None, "N", "EUR", 100e6, 100e6, "AT MATURITY", "", "2026-10-14"),
+        ("AT1<corp>", "L1", "XS5", "Jr Subordinated", "Additional Tier 1", "JR SUBORDINATED", 7.0, "FIXED", None, "2030-06-01", "Y", "EUR", 400e6, 400e6, "PERP/CALL", "", "2026-10-14"),
+        ("ZERO<corp>", "L1", "LU1", "Sr Unsecured", None, "SR UNSECURED", 0.0, "ZERO COUPON", "2064-01-01", None, "N", "EUR", 5e6, 5e6, "AT MATURITY", "", "2026-10-14"),
+        ("CONV<corp>", "L1", "CH1", "Sr Unsecured", None, "SR UNSECURED", 9.0, "FIXED", "2027-02-01", None, "N", "USD", 12e6, 12e6, "CONVERTIBLE", "EMTN", "2026-10-14"),
+        ("PLAIN<corp>", "L1", "XS6", "Sr Unsecured", None, "SR UNSECURED", 5.0, "FIXED", "2028-03-01", None, "N", "EUR", 50e6, 50e6, "AT MATURITY", "EMTN", "2026-10-14"),
+        ("COV<corp>", "L2", "XS7", "Secured", None, "COVERED", 2.0, "FIXED", "2029-04-01", None, "N", "EUR", 700e6, 700e6, "AT MATURITY", "EMTN", "2026-10-14"),
+        ("CALLED<corp>", "L2", "XS8", "Sr Preferred", None, "SR PREFERRED", 2.0, "FIXED", "2030-04-01", None, "N", "EUR", 100e6, 0.0, "AT MATURITY", "EMTN", "2026-10-14"),
+        ("MATURED<corp>", "L2", "XS9", "Sr Preferred", None, "SR PREFERRED", 2.0, "FIXED", "2020-04-01", None, "N", "EUR", 100e6, 100e6, "AT MATURITY", "EMTN", "2026-10-14"),
+    ]
+    conn.executemany(f"INSERT INTO bbg_bond ({cols}) VALUES ({','.join('?' * 17)})", rows)
+    conn.execute("INSERT INTO bbg_bond_market (security, pull_date, quote_date, px_mid, ytm_mid) VALUES ('SP<corp>', '2026-10-14', '2026-10-14', 99.5, 3.2), ('SP<corp>', '2026-10-10', '2026-10-10', 90.0, 9.9)")
+    conn.executemany("INSERT INTO bbg_bond_listing (lei, issuer_ticker, security, description, status) VALUES (?, 'T', ?, 'Issuer', ?)", [
+        ("L2", "T 0 01/02/2029<corp>", "ambiguous"), ("L2", "T 5<7/8> 06/28/2035 REGS<corp>", "unresolved"), ("L2", "T 0 04/21/2027<corp>", None), ("L2", "T 0 01/02/2020<corp>", "ambiguous"),
+        ("L2", "T 0 PERP<corp>", "unresolved"), ("L1", "SP<corp>", "ok"), ("L2", "COV<corp>", None)])
+    data = issuance.load(conn, [("AAA", "L1"), ("BBB", "L2")], today)
+    iss, un = data["issues"].set_index("security"), data["unresolved"]
+    g = lambda s, c: iss.loc[s, c]  # noqa: E731
+    check("issues: debt types of the invented bonds", [g(s, "debt_type") for s in ("SP<corp>", "SNP<corp>", "T2BIG<corp>", "AT1<corp>", "ZERO<corp>", "CONV<corp>", "PLAIN<corp>", "COV<corp>")]
+          == [issuance.SP, issuance.SNP, issuance.T2, issuance.AT1, issuance.STRUCTURED, issuance.STRUCTURED, issuance.SENIOR, issuance.COVERED])
+    check("issues: public or private (EMTN public even when small, standalone from 150m, smaller private)", [g(s, "public_private") for s in ("SP<corp>", "CONV<corp>", "T2BIG<corp>", "T2SML<corp>", "ZERO<corp>", "AT1<corp>")]
+          == ["Public", "Public", "Public", "Private", "Private", "Public"])
+    check("issues: active flag (a called bond and a matured bond are not active; the perpetual is)", [g(s, "active") for s in ("SP<corp>", "CALLED<corp>", "MATURED<corp>", "AT1<corp>")] == ["Y", "N", "N", "Y"])
+    check("issues: amount in EUR (12m USD at 1.2 = 10m) and size bucket", abs(g("CONV<corp>", "eur") - 10.0) < 1e-9 and g("CONV<corp>", "size_bucket") == "10 to 50" and g("ZERO<corp>", "size_bucket") == "below 10")
+    check("issues: maturity bucket (open bucket for 2064, perpetual 9999) and call-adjusted bucket (the call year when a call is ahead)",
+          (g("ZERO<corp>", "bucket_m"), g("AT1<corp>", "bucket_m"), g("AT1<corp>", "bucket_c"), g("SNP<corp>", "bucket_m"), g("SNP<corp>", "bucket_c")) == (2036, issuance.PERPETUAL_KEY, 2030, 2031, 2030)
+          and pd.isna(g("CALLED<corp>", "bucket_m")))
+    check("issues: the latest market row of a bond is used", g("SP<corp>", "px") == 99.5 and g("SP<corp>", "ytm") == 3.2)
+    check("unresolved: a matured name and a name that is in the bond table are left out; status text, coupon, maturity, perpetual", len(un) == 4 and set(un["status"]) == {"Ambiguous", "Not found", "Not loaded"}
+          and sorted(un["bucket"]) == [2027, 2029, 2035, issuance.PERPETUAL_KEY] and 5.875 in un["coupon"].tolist())
+    if True:
+        import tempfile
+
+        try:
+            import formulas
+            import openpyxl
+        except ImportError:
+            print("  skipped (pip install formulas): the formulas of the Profile sheet")
+            return
+        tmp = Path(tempfile.mkdtemp()) / "iss.xlsx"
+        issuance_xlsx.write_workbook(str(tmp), data)
+        wb = openpyxl.load_workbook(tmp)
+        check("workbook: four sheets, one selected tab, charts on the Profile, tables with a filter", wb.sheetnames == ["Read me", "Profile", "Issues", "Listed without data"] and sum(1 for s in wb if s.sheet_view.tabSelected) == 1
+              and len(wb["Profile"]._charts) == 3 and len(wb["Issues"].tables) == 1)
+        sol = formulas.ExcelModel().loads(str(tmp)).finish().calculate()
+        keys = {k.upper(): k for k in sol}
+
+        def val(coord: str):
+            v = sol[keys[f"'[{tmp.name}]PROFILE'!{coord}".upper()]].value
+            return v[0, 0] if hasattr(v, "shape") else v
+
+        ws = wb["Profile"]
+        labels = issuance.bucket_labels(2026)
+        act = data["issues"][data["issues"]["active"] == "Y"]
+        bad = []
+        for basis in (1, 2):
+            ws["B4"] = basis
+            wb.save(tmp)
+            sol = formulas.ExcelModel().loads(str(tmp)).finish().calculate()
+            keys = {k.upper(): k for k in sol}
+            for r in range(1, ws.max_row + 1):
+                if str(ws.cell(row=r, column=2).value or "").startswith("Issuer filter"):
+                    crit = ws.cell(row=r, column=5).value
+                    sub = act if crit == "*" else act[act["issuer"] == crit]
+                    for i, kind in enumerate(issuance.DEBT_TYPES):
+                        for j, (key, _) in enumerate(labels, start=2):
+                            exp = sub[(sub["debt_type"] == kind) & (sub["bucket_m" if basis == 1 else "bucket_c"] == key)]["eur"].sum()
+                            got = val(f"{openpyxl.utils.get_column_letter(j)}{r + 3 + i}")
+                            if abs(float(got) - exp) > 1e-9:
+                                bad.append((basis, crit, kind, key, got, exp))
+        check("workbook: every cell of the debt type by bucket table equals pandas, for both bases, each issuer and combined", not bad, str(bad[:3]))
+        r_comb = next(r for r in range(1, ws.max_row + 1) if ws.cell(row=r, column=5).value == "*")
+        total = val(f"N{r_comb + 3 + len(issuance.DEBT_TYPES)}")
+        check("workbook: the combined total equals the sum of the active bonds in EUR", abs(float(total) - act["eur"].sum()) < 1e-9, f"{total} {act['eur'].sum()}")
+        tmp.unlink(missing_ok=True)
 
 
 def test_equity_and_market() -> None:
@@ -292,8 +432,8 @@ def test_equity_and_market() -> None:
     check("LEI of an entity: the key when the entity table has no LEI", ma_market.lei_of(lambda *_: pd.DataFrame({"lei": []}), "K1") == "K1")
 
     pe = ma_market.peers(q)["rows"]
-    check("peers: P/TBV = price / tangible book (16 / 10 = 1.6) and RoTE = EPS / tangible book (1.2 / 10 = 12%)", len(pe) == 1 and near(pe[0]["ptbv"], 1.6) and near(pe[0]["rote"], 0.12))
-    check("peers: P/CET1 = market cap / CET1 of P3DH (14.4bn / 8bn = 1.8) and RoCET1 = EPS x shares / CET1 (14.4bn x 1.2 / 16 / 8bn = 13.5%)", near(pe[0]["pcet1"], 1.8) and near(pe[0]["rocet1"], 0.135))
+    check("peers: P/TBV = price to book ratio x book value / tangible book value (1.3333 x 12 / 10 = 1.6) and RoTE = EPS / tangible book (1.2 / 10 = 12%)", len(pe) == 1 and near(pe[0]["ptbv"], 1.6) and near(pe[0]["rote"], 0.12))
+    check("peers: P/CET1 = market cap / CET1 of P3DH (14.4bn / 8bn = 1.8) and RoCET1 = P/CET1 x EPS / price in EUR (1.8 x 1.2 / 16 = 13.5%)", near(pe[0]["pcet1"], 1.8) and near(pe[0]["rocet1"], 0.135))
     check("peers: a proxy group is not a peer", all(p_["lei"] != "FR969500TJ5KRTCJQWXH" for p_ in pe))
     conn.execute("DELETE FROM clean_period_fact")
     check("peers: a bank without CET1 in P3DH is left out", ma_market.peers(q)["rows"] == [])
@@ -301,9 +441,9 @@ def test_equity_and_market() -> None:
     conn.execute("UPDATE bbg_entity SET country_iso = 'US' WHERE lei = 'LEI_SELF_00000000001'")
     check("peers: banks outside Europe are not in the fit", ma_market.peers(q)["rows"] == [] and len(ma_market.peers(q, {"US"})["rows"]) == 1)
     conn.execute("UPDATE bbg_entity SET country_iso = 'GR' WHERE lei = 'LEI_SELF_00000000001'")
-    conn.execute("UPDATE bbg_equity_snapshot SET value = 80.0 WHERE ticker = 'SELF GA' AND field = 'PX_LAST'")
+    conn.execute("UPDATE bbg_equity_snapshot SET value = 80.0 / 12.0 WHERE ticker = 'SELF GA' AND field = 'PX_TO_BOOK_RATIO'")
     check("peers: a P/TBV above 6x is left out", ma_market.peers(q)["rows"] == [])
-    conn.execute("UPDATE bbg_equity_snapshot SET value = 16.0 WHERE ticker = 'SELF GA' AND field = 'PX_LAST'")
+    conn.execute("UPDATE bbg_equity_snapshot SET value = 16.0 / 12.0 WHERE ticker = 'SELF GA' AND field = 'PX_TO_BOOK_RATIO'")
     check("peers: at a normal price the bank is a peer, and nothing is removed", len(ma_market.peers(q)["rows"]) == 1 and ma_market.peers(q)["removed"] == [])
     conn.execute("UPDATE bbg_entity SET parent_relationship = 'Subsidiary', parent_name = 'Parent Bank AG' WHERE lei = 'LEI_SELF_00000000001'")
     pr = ma_market.peers(q)
@@ -330,6 +470,27 @@ def test_equity_and_market() -> None:
     conn.execute("UPDATE bbg_equity_snapshot SET value = 'Finance-Leasing Compan' WHERE ticker = 'SELF GA' AND field = 'INDUSTRY_SUBGROUP'")
     pr = ma_market.peers(q)
     check("peers: a specialist is left out and listed with the reason", pr["rows"] == [] and [x["reason"] for x in pr["removed"]] == ["specialist"], str(pr["removed"]))
+    conn.execute("UPDATE bbg_equity_snapshot SET value = 'Commer Banks Non-US' WHERE ticker = 'SELF GA' AND field = 'INDUSTRY_SUBGROUP'")
+    check("peers: the bank is a normal peer again", len(ma_market.peers(q)["rows"]) == 1)
+    conn.execute("UPDATE bbg_equity_snapshot SET value = 'DKK' WHERE ticker = 'SELF GA' AND field = 'CRNCY'")
+    conn.execute("UPDATE bbg_equity_snapshot SET value = 16.0 * 7.475 WHERE ticker = 'SELF GA' AND field = 'PX_LAST'")
+    pk = ma_market.peers(q)["rows"]
+    check("peers: a bank that trades in another currency (price 7.475 times higher, per-share values in EUR) keeps P/TBV 1.6 and RoCET1 13.5%; the old formula gave 12.0 and dropped it",
+          len(pk) == 1 and near(pk[0]["ptbv"], 1.6) and near(pk[0]["rocet1"], 0.135), str(pk))
+    conn.execute("UPDATE bbg_equity_snapshot SET value = 'EUR' WHERE ticker = 'SELF GA' AND field = 'CRNCY'")
+    conn.execute("UPDATE bbg_equity_snapshot SET value = 16.0 WHERE ticker = 'SELF GA' AND field = 'PX_LAST'")
+    conn.execute("INSERT INTO clean_period_fact VALUES ('LEI_SELF_00000000001', '2026-06-30', 'K_61.00', 10, '0040', 50000000000.0)")  # TREA 50bn
+    conn.execute("UPDATE bbg_entity SET rwa = 50000.0 WHERE lei = 'LEI_SELF_00000000001'")  # EUR million
+    check("peers: P3DH TREA equal to the Bloomberg RWA: the bank is a peer", len(ma_market.peers(q)["rows"]) == 1)
+    conn.execute("UPDATE bbg_entity SET rwa = 2000.0 WHERE lei = 'LEI_SELF_00000000001'")
+    pr = ma_market.peers(q)
+    check("peers: P3DH TREA 25 times the Bloomberg RWA: left out and listed with the reason scale mismatch", pr["rows"] == [] and [x["reason"] for x in pr["removed"]] == ["scale mismatch"], str(pr["removed"]))
+    conn.execute("UPDATE bbg_entity SET rwa = 30000.0 WHERE lei = 'LEI_SELF_00000000001'")
+    check("peers: TREA 1.67 times the Bloomberg RWA is inside the range (0.5 to 2)", len(ma_market.peers(q)["rows"]) == 1)
+    conn.execute("UPDATE bbg_entity SET rwa = NULL WHERE lei = 'LEI_SELF_00000000001'")
+    check("peers: a bank without Bloomberg RWA is not tested", len(ma_market.peers(q)["rows"]) == 1)
+    conn.execute("DELETE FROM bbg_equity_snapshot WHERE ticker = 'SELF GA' AND field = 'PX_TO_BOOK_RATIO'")
+    check("peers: a bank without the price to book ratio is left out (the price cannot be converted)", ma_market.peers(q)["rows"] == [])
 
 
 def test_rates_reader() -> None:
@@ -558,6 +719,7 @@ if __name__ == "__main__":
     test_bond_market()
     test_bond_history()
     test_universe()
+    test_issuance()
     test_perpetual_and_series()
     test_refresh()
     test_equity_and_market()

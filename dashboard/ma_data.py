@@ -96,9 +96,9 @@ class BankData:
 
 
 def km1_periods(query: Query, entity_key: str) -> list[str]:
-    d = query("""SELECT DISTINCT period_end FROM clean_period_fact
+    d = query("""SELECT period_end FROM clean_period_fact
                  WHERE entity_key = ? AND template_code = 'K_61.00' AND measure_col = 10 AND row_code IN ('0010', '0040')
-                   AND value IS NOT NULL ORDER BY period_end DESC""", (entity_key,))
+                   AND value IS NOT NULL GROUP BY period_end HAVING COUNT(DISTINCT row_code) = 2 ORDER BY period_end DESC""", (entity_key,))  # a period needs CET1 and TREA
     return list(d["period_end"])
 
 
@@ -257,6 +257,12 @@ def load_bank(query: Query, key: str, as_of: str) -> BankData:
     _load_cells(query, key, as_of, bank.items)
     _load_dta(query, key, as_of, bank.items)
     _load_assets(query, key, as_of, bank.items)
+    if bank.item("total_assets").value is None:  # the table of entity assets has no usable row: take the balance sheet of CC2, then the leverage exposure template LR1
+        for name in ("cc2_total_assets", "lr1_total_assets"):
+            it = bank.item(name)
+            if it.value is not None:
+                bank.items["total_assets"] = Item(it.value, it.period, it.source, it.quality)
+                break
     _ratio_scale(bank.items)
     _load_irrbb(query, key, as_of, bank)
     return bank

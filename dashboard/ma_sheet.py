@@ -288,6 +288,8 @@ class Run:
                 self.stack.add(key)
                 try:
                     val = self.ev(self.m.ast(key))
+                    if val is None:  # Excel: a formula that links to an empty cell gives 0
+                        val = 0.0
                 except XlError as e:
                     val = e
                 except ZeroDivisionError:

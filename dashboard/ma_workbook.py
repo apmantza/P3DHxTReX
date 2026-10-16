@@ -19,11 +19,14 @@ from openpyxl.utils import get_column_letter
 
 import ma_data
 import ma_market
+import ma_pack_base
 import ma_sheet
 
 ROOT = Path(__file__).resolve().parents[1]
 ORIGINAL = ROOT / "docs" / "M&A calc.xlsx"
 NBG_KEY = "5UMCZOEYKCVFAW8ZLO05"
+
+PACK_LEI = "9CZ7TVMR36CYD5TZBS50"  # BIL: the deal pack sheets are written only when this bank is the first target
 
 BANK_COLS = ["D", "E", "F", "G"]
 TGT = ["E", "F", "G"]
@@ -129,8 +132,16 @@ FORMATS = {"pct": "0.0%", "pct2": "0.00%", "bn": "0.00", "x": '0.00"x"', "bp": "
 # --------------------------------------------------------------------------------------------- data
 
 def load_market(query, banks: list[ma_data.BankData]) -> dict:
-    """Bloomberg data from the database for NBG and the three targets (banks[0] is NBG)."""
-    return ma_market.load(query, [ma_market.lei_of(query, b.key) for b in banks])
+    """Bloomberg data from the database for NBG and the three targets (banks[0] is NBG). market["pack"] holds the data of the deal pack sheets (NBG and the first target)."""
+    market = ma_market.load(query, [ma_market.lei_of(query, b.key) for b in banks])
+    if market["slots"][1]["lei"] == PACK_LEI:  # the labels and the Luxembourg drivers of the pack are those of BIL: no other first target gets the pack
+        try:
+            import ma_pack_data
+
+            market["pack"] = ma_pack_data.load(query, banks, market)
+        except Exception as e:  # noqa: BLE001 - the model works without the pack: the pack sheets then say what is missing
+            market["pack"] = {"missing": [f"pack: {type(e).__name__}: {str(e)[:100]}"]}
+    return market
 
 
 def item_value(bank: ma_data.BankData, key: str, kind: str):
@@ -171,7 +182,7 @@ def default_deal(bank: ma_data.BankData, lei: str) -> dict[str, Any]:
 
 
 def default_globals() -> dict[str, Any]:
-    return dict(cet1_target=0.13, mrel_target=0.29, year=2, pe=14.0, integ_pct=0.20, integ_years=5, excess_value=1.0, dividend_waiver=0.8, rwa_nbg=0.0, peers_k=20, peers_basis=3, target_instruments=1.0, sub_req=0.135, sub_assets=100, sub_tem=0.05, coe_g=0.02, coe_first=0.10, coe_third=0.0)
+    return dict(cet1_target=0.13, mrel_target=0.29, year=2, pe=14.0, integ_pct=0.20, integ_years=5, excess_value=1.0, dividend_waiver=0.8, rwa_nbg=0.0, peers_k=20, peers_basis=3, target_instruments=1.0, target_senior=0.0, sub_req=0.135, sub_assets=100, sub_tem=0.05, coe_g=0.02, coe_first=0.10, coe_third=0.0)
 
 
 # ---------------------------------------------------------------------------------------- workbook
@@ -363,8 +374,10 @@ def write_peers(ws, market: dict) -> None:
     rng = lambda col: f"{col}{first}:{col}{last}"  # noqa: E731
     ws["A1"] = "Peers for a bank without a market cap. Median multiple of the k listed banks with the closest return. Do not publish this sheet."
     ws["A1"].font = BOLD
-    ws["A2"] = ("Listed European banks of P3DH. P/TBV = price / tangible book value per share. RoTE = EPS of the last 12 months / tangible book value per share. "
-                "P/CET1 = market cap in EUR / CET1 of P3DH. RoCET1 = EPS x shares / CET1. A bank outside P/TBV 0.15x to 6x, P/CET1 0.2x to 6x, or a return of -10% to 60% is left out. "
+    ws["A2"] = ("Listed European banks of P3DH. P/TBV = price to book ratio x book value / tangible book value per share (the price is in the currency of the stock, the per-share values are in EUR, so the ratio of Bloomberg is used). "
+                "RoTE = EPS of the last 12 months / tangible book value per share. "
+                "P/CET1 = market cap in EUR / CET1 of P3DH. RoCET1 = P/CET1 x EPS / price in EUR. A bank outside P/TBV 0.15x to 6x, P/CET1 0.15x to 6x, or a return of -10% to 60% is left out. "
+                "A bank whose TREA in P3DH differs from the RWA of Bloomberg by more than a factor of 2 is left out (scale mismatch). "
                 "Subsidiaries, cooperatives, and specialist lenders are left out too: they are listed under the peers.")
     ws["A3"], ws["B3"] = "Nearest peers used (k), input N17 of Calc", "=Calc!$N$17"
     ws["A4"], ws["A5"], ws["A6"], ws["A7"], ws["A8"] = ("Target", "Return of the target: RoTE (distance to P/TBV peers) and RoCET1 (distance to P/CET1 peers)", "Distance of the k-th nearest peer",
@@ -497,16 +510,18 @@ def write_calc(ws, b: Builder, banks: list[ma_data.BankData], deals: list[dict],
         (16, "Add DTAs relying on future profitability to CET1 (1 = yes)", 0, "0", "Original lever in rows 28 and 29. Default 0: P3DH shows they are in CET1 already"),
         (17, "Nearest listed peers used to value a bank without a market cap (k)", g["peers_k"], "0", "Median multiple of the k banks with the closest return (sheet Peers)"),
         (18, "Valuation basis of such a bank (1 = tangible equity, 2 = CET1, 3 = average)", g["peers_basis"], "0", "CET1 is below tangible equity by the other CET1 deductions"),
-        (19, "Share of the target's AT1, Tier 2, and eligible liabilities that count in the group", g["target_instruments"], "pct",
-         "100% = all count. A subsidiary's instruments count at group level in part (CRR Articles 83 to 88), and as external MREL only if it is a resolution entity. 0% shows the need without them"),
+        (19, "Share of the target's AT1 and Tier 2 that counts in the group, applied to the recognition of row 233", g["target_instruments"], "pct",
+         "100% = as CRR Article 87 recognises them in consolidated own funds (row 233). 0% shows the need without them"),
         (20, "Assumed subordination requirement of a combination without a filed one (% of TREA)", g["sub_req"], "pct",
          "Banks above EUR 100bn of assets that file one report 13.5% to 31% (P3DH KM2 row EU-8). 13.5% is the most frequent value of the banks of EUR 100bn to 250bn"),
-        (21, "Assets from which the assumption applies (EUR bn)", g["sub_assets"], "0", "NBG and BIL together have EUR 113bn. NBG alone has EUR 83bn and files 0%"),
+        (21, "Assets from which the assumption applies (EUR bn)", g["sub_assets"], "0", "NBG and BIL together have more than EUR 100bn (about 115bn). NBG alone has EUR 83bn and files 0%"),
         (22, "Floor of the subordination requirement (% of the leverage exposure)", g["sub_tem"], "pct", "Filed requirements are 5.0% to 8.2% of the exposure (KM2 row EU-10)"),
         (23, "Growth rate for the cost of equity of the peers (g)", g["coe_g"], "pct", "Gordon model: P/TBV = (return - g) / (cost of equity - g). The cost of equity of a peer is g + (return - g) / multiple"),
         (24, "Cost of equity of the first target (BIL) (0 = that of its peers, no adjustment)", g["coe_first"], "pct",
          "A judgment: BIL is smaller and unlisted. The peers do not show a size premium. The peer value is scaled by (cost of equity of the peers - g) / (this - g). Rows 224 to 231"),
         (25, "Cost of equity of the third target (HCOB) (0 = that of its peers, no adjustment)", g["coe_third"], "pct", "Default 0: no adjustment. The second target (Bank of Cyprus) is listed and has no adjustment"),
+        (26, "Share of the target's eligible liabilities (senior) that counts in the group", g["target_senior"], "pct",
+         "0% = single point of entry: only liabilities that the resolution entity issues count (SRB MREL policy, paragraph 111). 100% = all count, as if the target were its own resolution entity"),
     ]
     for r, text, v, kind, note in extra:
         put(f"M{r}", text)
@@ -568,13 +583,13 @@ def write_calc(ws, b: Builder, banks: list[ma_data.BankData], deals: list[dict],
     label(21, "CET1 ratio"); fill(21, ALL, "={c}20/{c}8", "pct")
     label(22, "AT1")
     fill(22, BANK_COLS, "=P3DH!{c}" + str(b.rows["t1"]) + "-P3DH!{c}" + str(b.rows["cet1"]), "bn", "link")
-    fill(22, COMBOS, "=$D22+$N$19*{t}22+{c}68", "bn")
+    fill(22, COMBOS, "=$D22+$N$19*{t}233*{t}22+{c}68", "bn")
     label(23, "Tier2")
     fill(23, BANK_COLS, "=P3DH!{c}" + str(b.rows["tc"]) + "-P3DH!{c}" + str(b.rows["t1"]), "bn", "link")
-    fill(23, COMBOS, "=$D23+$N$19*{t}23+{c}69", "bn")
+    fill(23, COMBOS, "=$D23+$N$19*{t}233*{t}23+{c}69", "bn")
     label(24, "Senior (MREL eligible liabilities)")
     fill(24, BANK_COLS, "=IF(P3DH!{c}" + str(b.rows["km2_ofel"]) + ">0,P3DH!{c}" + str(b.rows["km2_ofel"]) + "-P3DH!{c}" + str(b.rows["tc"]) + ",0)", "bn", "link")
-    fill(24, COMBOS, "=$D24+$N$19*{t}24+{c}70+{c}71", "bn")
+    fill(24, COMBOS, "=$D24+$N$26*{t}24+{c}70+{c}71", "bn")
     label(25, "MREL total"); fill(25, BANK_COLS + COMBOS, "={c}20+{c}22+{c}23+{c}24", "bn")
     label(26, "MREL ratio"); fill(26, BANK_COLS + COMBOS, "={c}25/{c}8", "pct")
     ws["C27"] = '="MREL needed for "&TEXT($D$2*100,"0")&"% ratio (+ shortfall, - surplus)"'
@@ -799,10 +814,10 @@ def write_calc(ws, b: Builder, banks: list[ma_data.BankData], deals: list[dict],
     ofel, osub, rsub = b.rows["km2_ofel"], b.rows["km2_ofel_sub"], b.rows["km2_req_trea_sub"]
     label(154, "Senior non-preferred: subordinated eligible liabilities (€bn)", True)
     fill(154, BANK_COLS, "=IF(P3DH!{c}" + str(osub) + ">0,P3DH!{c}" + str(osub) + "-P3DH!{c}" + str(b.rows["tc"]) + ",0)", "bn", "link")
-    fill(154, COMBOS, "=$D154+$N$19*{t}154+{c}70", "bn")
+    fill(154, COMBOS, "=$D154+$N$26*{t}154+{c}70", "bn")
     label(155, "Senior preferred: non-subordinated eligible liabilities (€bn)", True)
     fill(155, BANK_COLS, "=IF(P3DH!{c}" + str(ofel) + ">0,P3DH!{c}" + str(ofel) + "-P3DH!{c}" + str(osub) + ",0)", "bn", "link")
-    fill(155, COMBOS, "=$D155+$N$19*{t}155+{c}71", "bn")
+    fill(155, COMBOS, "=$D155+$N$26*{t}155+{c}71", "bn")
     label(156, "The two lines add up to row 24 (1 = yes)", True)
     fill(156, BANK_COLS + COMBOS, "=IF(ABS({c}154+{c}155-{c}24)<0.001,1,0)", "flag")
     label(157, "Subordinated resources, % of RWAs (own funds + senior non-preferred)", True)
@@ -865,7 +880,7 @@ def write_calc(ws, b: Builder, banks: list[ma_data.BankData], deals: list[dict],
     label(194, "Need at the targets: eligible liabilities to reach the MREL target D2, after row 193 (€bn)", True)
     fill(194, BANK_COLS + COMBOS, "=MAX(0,$D$2*{c}170-{c}185-{c}193)", "bn")
     label(195, "Total issuance need at the targets (€bn), not less than row 192", True); fill(195, BANK_COLS + COMBOS, "=MAX({c}193+{c}194,{c}192)", "bn")
-    label(196, "AT1, Tier 2, and eligible liabilities of the target that count in the group (€bn)", True); fill(196, COMBOS, "=$N$19*({t}22+{t}23+{t}24)", "bn")
+    label(196, "AT1, Tier 2, and eligible liabilities of the target that count in the group (€bn)", True); fill(196, COMBOS, "=$N$19*{t}233*({t}22+{t}23)+$N$26*{t}24", "bn")
     label(197, "Need at the MREL target if none of them counted (€bn)", True); fill(197, COMBOS, "=MAX(0,$D$2*{c}170-({c}185-{c}196)-{c}193)", "bn")
     label(198, "Mitigation by the capital structure of the target (€bn)", True); fill(198, COMBOS, "={c}197-{c}194", "bn")
     label(199, "Goodwill of the deal, deducted from CET1 (€bn)", True); fill(199, COMBOS, "={c}81", "bn")
@@ -918,6 +933,13 @@ def write_calc(ws, b: Builder, banks: list[ma_data.BankData], deals: list[dict],
     label(231, "Effect of the cost of equity of the target on the peer value (€bn)", True)
     fill(231, TGT, "={c}167-{c}230", "bn")
 
+    # ---- recognition of the AT1 and Tier 2 of a target in the consolidated own funds of the group (CRR Articles 84 to 88)
+    label(232, "RECOGNITION OF THE TARGET'S AT1 AND TIER 2 IN CONSOLIDATED OWN FUNDS (new, CRR Article 87)", True); ws["C232"].font = BOLD
+    fill(232, TGT, "={c}6")
+    label(233, "Share recognised = 1 - surplus / gross capital items. Surplus = own funds of the target - the lower of its own requirement and the group requirement for it (row 102 of NBG on the RWAs of the target)", True)
+    gross = b.rows["cc1_cet1_before_adj"]
+    fill(233, TGT, "=IF(({c}20+{c}22+{c}23)<=0,1,1-MAX(0,({c}20+{c}22+{c}23)-MIN({c}102*{c}8,$D$102*{c}8))/(P3DH!{c}" + str(gross) + "+{c}22+{c}23))", "pct")
+
     ws.column_dimensions["A"].width = 2
     ws.column_dimensions["B"].width = 2
     ws.column_dimensions["C"].width = 58
@@ -942,13 +964,13 @@ ROW_KIND.update({154: "bn", 155: "bn", 156: "flag", 157: "pct2", 158: "pct2", 15
                  119: "pct2", 120: "pct2", 121: "bp", 122: "bn", 123: "bn", 124: "bn", 125: "text", 126: "text", 127: "pct", 128: "pct2", 146: "flag", 147: "flag",
                  148: "flag", 149: "flag", 150: "flag", 151: "text", 152: "flag", 129: "text", 161: "pct", 162: "pct", 163: "x", 164: "x", 165: "bn", 166: "bn", 167: "bn",
                  170: "bn", 171: "pct", 172: "pct", 173: "pct2", 174: "pct2", 175: "pct2", 176: "pct2", 177: "pct2", **{r: "bn" for r in range(178, 200)}, 200: "bp", 201: "bn", 203: "text", **{r: "pct2" for r in range(204, 208)}, **{r: "bn" for r in range(208, 223)}, **{r: "bn" for r in range(131, 137)}, **{r: "pct" for r in range(138, 144)},
-                 225: "pct", 226: "pct", 227: "pct", 228: "0.000", 229: "0.000", 230: "bn", 231: "bn"})
+                 225: "pct", 226: "pct", 227: "pct", 228: "0.000", 229: "0.000", 230: "bn", 231: "bn", 233: "pct"})
 # Cells whose format differs from the rest of the row (an amount of NBG next to ratios of the combinations)
 CELL_KIND = {("D", 29): "bn", ("D", 41): "bn"}
 SECTIONS = [
     ("M&A analysis", 5, 17), ("Equity and market cap", 19, 46), ("Share performance and dilution", 47, 58),
     ("Deal inputs (new)", 60, 70), ("Purchase accounting (new)", 72, 88), ("Regulatory view (new)", 90, 129), ("IRRBB (new)", 130, 143), ("Checks (new)", 145, 152), ("MREL detail (new)", 153, 159),
-    ("Peer valuation (new)", 160, 167), ("Issuance needs (new)", 169, 201), ("Capital buckets and instruments (new)", 203, 222), ("Cost of equity of the target (new)", 224, 231),
+    ("Peer valuation (new)", 160, 167), ("Issuance needs (new)", 169, 201), ("Capital buckets and instruments (new)", 203, 222), ("Cost of equity of the target (new)", 224, 231), ("Recognition of target capital (new)", 232, 233),
 ]
 
 
@@ -1022,6 +1044,7 @@ def write_merger(ws, b: Builder, deals: list[dict], market: dict) -> None:
     npl, perf = b.rows["cr1_loans_npl"], b.rows["cr1_loans_performing"]
     for i, d in enumerate(deals):
         R, T, X, m = merger_start(i), TGT[i], COMBOS[i], MCOLS[1 + i]
+        pack_bil = i == 0 and market.get("pack") is not None  # deal 1 takes the forecast of BIL from sheet P&L
 
         def cr(metric: str, k: int, col: str = m) -> str:
             return f"Market!{col}{cons_row(metric, k)}"
@@ -1095,13 +1118,18 @@ def write_merger(ws, b: Builder, deals: list[dict], market: dict) -> None:
             # target: consensus of the year when the bank has it. Otherwise the last 12 months, the opex, and the growth inputs
             ni, sa, op = cr("NI", k), cr("SALES", k), cr("OPP", k)
             if k == 0:
-                put(c, "t_cost", f"=IF(AND({sa}<>0,{op}<>0),-({sa}-{op}),-Market!${m}${MROW['opex']})")
-                put(c, "t_rev", f"=IF({sa}<>0,{sa},-{c}{a('t_cost')}/$D${a('cir')})")
-                put(c, "t_np", f"=IF({ni}<>0,{ni},Market!${m}${MROW['ni_base']})")
+                old = {"t_cost": f"IF(AND({sa}<>0,{op}<>0),-({sa}-{op}),-Market!${m}${MROW['opex']})",
+                       "t_rev": f"IF({sa}<>0,{sa},-{c}{a('t_cost')}/$D${a('cir')})",
+                       "t_np": f"IF({ni}<>0,{ni},Market!${m}${MROW['ni_base']})"}
             else:
-                put(c, "t_cost", f"=IF(AND({sa}<>0,{op}<>0),-({sa}-{op}),{prev}{a('t_cost')}*(1+$D${a('cost_g')}))")
-                put(c, "t_rev", f"=IF({sa}<>0,{sa},{prev}{a('t_rev')}*(1+$D${a('cost_g')}))")
-                put(c, "t_np", f"=IF({ni}<>0,{ni},{prev}{a('t_np')}*(1+$D${a('np_g')}))")
+                old = {"t_cost": f"IF(AND({sa}<>0,{op}<>0),-({sa}-{op}),{prev}{a('t_cost')}*(1+$D${a('cost_g')}))",
+                       "t_rev": f"IF({sa}<>0,{sa},{prev}{a('t_rev')}*(1+$D${a('cost_g')}))",
+                       "t_np": f"IF({ni}<>0,{ni},{prev}{a('t_np')}*(1+$D${a('np_g')}))"}
+            for key, drv in (("t_cost", "costs"), ("t_rev", "rev"), ("t_np", "np_drv")):
+                if pack_bil:  # BIL has no consensus: the switch on sheet P&L chooses the driver-based forecast or the old rule
+                    put(c, key, f"=IF('{ma_pack_base.PNL_SHEET}'!$B$4=1,'{ma_pack_base.PNL_SHEET}'!{ma_pack_base.PNL_YC[k]}{ma_pack_base.bil_row(drv)},{old[key]})")
+                else:
+                    put(c, key, "=" + old[key])
             put(c, "t_phase", f"={c}{a('phase')}")
             put(c, "t_cost_syn", f"=-{c}{a('t_cost')}*$D${a('syn_cost')}*{c}{a('t_phase')}")
             put(c, "t_rev_syn", f"={c}{a('t_rev')}*$D${a('syn_rev')}*{c}{a('t_phase')}")
@@ -1182,6 +1210,10 @@ def build_model_sheets(wb: openpyxl.Workbook, banks: list[ma_data.BankData], dea
     write_peers(pr, market)
     write_calc(calc, b, banks, deals, g)
     write_merger(wb.create_sheet("Merger"), b, deals, market)
+    if market.get("pack") is not None:
+        import ma_pack
+
+        ma_pack.write_sheets(wb, banks, deals, g, market)
 
 
 ORIGINAL_INPUTS: dict[str, Any] = {
@@ -1281,8 +1313,8 @@ REVIEW: list[tuple[str, str, str, str]] = [
      "BIL and HCOB default to 0%. BoC keeps 15% over its market cap. Change the premium in row 37."),
     ("H22:J24, rows 169 to 201", "Method", "The original had no issuance need. Requirements of the combination were not weighted by RWAs, and the shortfall of each layer was not turned into an amount to issue.",
      "Rows 173 to 177 weight the requirement of each bank by its RWAs. Rows 178 to 195 give the amounts to issue for CET1, AT1, Tier 2, and eligible liabilities, at the requirements and at the targets D1 and D2. "
-     "CET1, AT1, and Tier 2 that are issued also count for the MREL. Rows 196 to 198 show how much the capital structure of the target reduces the need. N19 sets the share of its instruments that count."),
-    ("N20 to N22, rows 177 and 182", "Assumption", "NBG files a subordination requirement of 0% (KM2 row EU-8), and BIL, Eurobank, Piraeus, and Bank of Cyprus leave it empty. The combination of NBG and BIL has EUR 113bn of assets. "
+     "CET1, AT1, and Tier 2 that are issued also count for the MREL. Rows 196 to 198 show how much the capital structure of the target reduces the need. N19 and N26 set the share of the instruments of the target that count."),
+    ("N20 to N22, rows 177 and 182", "Assumption", "NBG files a subordination requirement of 0% (KM2 row EU-8), and BIL, Eurobank, Piraeus, and Bank of Cyprus leave it empty. The combination of NBG and BIL has about EUR 115bn of assets. "
      "All 22 banks above EUR 250bn and 16 of 19 banks of EUR 100bn to 250bn that file KM2 report a requirement: median 19.1% and 15.9% of TREA, and 13.50% for AIB, Bank of Ireland, Erste, BNP Paribas, Rabobank, and Belfius.",
      "Without a filed requirement, a combination of N21 (EUR 100bn) or more gets N20 (13.5% of TREA) plus the combined buffer, and not less than N22 (5%) of the leverage exposure. "
      "I could not check the legal text here. The rule behind 13.5% is probably the one for banks above EUR 100bn: verify it with the resolution authority. Set N20 to 0 to remove the assumption."),
@@ -1291,8 +1323,10 @@ REVIEW: list[tuple[str, str, str, str]] = [
     ("N23 to N25, rows 224 to 231", "Assumption", "The peers do not show a size premium in their cost of equity. BIL is smaller and unlisted, so its cost of equity is probably higher than the cost of equity that its peers imply.",
      "N24 sets the cost of equity of the first target (default 10%). The peer value is scaled by (cost of equity of the peers - g) / (N24 - g). The cost of equity of a peer is g + (return - g) / multiple, with g = N23 (2%). "
      "Set N24 to 0 to remove the adjustment. N25 does the same for the third target (default 0: no adjustment). Row 231 shows the effect."),
-    ("N19", "Limitation", "The AT1, Tier 2, and eligible liabilities of a target count in the group in full. In practice instruments of a subsidiary count at group level in part (CRR Articles 83 to 88), "
-     "and as external MREL only if the subsidiary is a resolution entity. Otherwise they are internal MREL.", "N19 (default 100%). Set it lower to test. P3DH shows no AT1 bond for BIL in Bloomberg, but 300m of AT1 in TLAC1."),
+    ("N19, N26, row 233", "Method", "The AT1, Tier 2, and eligible liabilities of a target counted in the group in full (one lever, N19, default 100%).",
+     "AT1 and Tier 2 are own funds. Consolidated own funds include the part that CRR Article 87 recognises: 1 - surplus / gross capital items (row 233, about 78% for BIL). N19 scales that recognition (default 100%). "
+     "Senior preferred and senior non-preferred debt are eligible liabilities: only liabilities that the resolution entity issues count in its group (SRB MREL policy, paragraph 111), so N26 is 0% by default (single point of entry). "
+     "At 100% they count in full, as if BIL were its own resolution entity. BIL must then meet its own requirement: see the sheet MREL scenario."),
     ("H4, E37", "Lever", "The stake in BIL is 90% because the State of Luxembourg holds 10% and does not sell. Price = stake x valuation x (1 + premium), so a premium of -10% on top of a stake of 90% counts the 10% twice.",
      "Stake 90% (H4). Premium 0%. Use the premium only for a real price difference."),
 ]
@@ -1399,6 +1433,12 @@ GUIDE = [
     "P3DH: data of the EBA Pillar 3 Data Hub (clean layer): capital, buffers, leverage, liquidity, MREL (KM2), deferred tax assets (CC2, CC1), intangible assets, IRRBB.",
     "Market: Bloomberg data from the database, by LEI: price, shares, market cap, profit, consensus, opex, tax rate, the ESTR OIS curve, and the average deposit rate per year, half year, and quarter. Do not publish this sheet.",
     "Peers: listed European banks of P3DH with P/TBV, P/CET1, and returns. The median multiple of the nearest peers values a bank that has no market cap. Do not publish this sheet.",
+    "Valuation: how the P/TBV and P/CET1 comps of the first target are derived. It has the peer funnel, the nearest peers, the cost of equity factor, the value by method, and sensitivity tables.",
+    "Balance sheet: capital, leverage, liquidity, MREL, risk-weighted assets by type, asset quality, rate risk, and balance sheet lines of NBG and the first target, with the simple sum and the pro forma.",
+    "P&L: history of both banks (OR2 and the EBA exercise), the consensus of NBG, the forward profit of the first target from drivers (switch B4: 1 = drivers, 0 = flat), and the combined P&L from the sheet Merger.",
+    "MREL scenario: requirement and resources of NBG, the target, and the combination under single and multiple point of entry (switch B4), the recognition of AT1 and Tier 2 (CRR Article 87), and the caveats.",
+    "Decisions: the open choices behind the numbers, each with its lever, its value now, and its effect now.",
+    "Sources: where each number comes from, its date, and its limits.",
     "Review: findings about the original sheet and what Calc does. A table shows the effect of the corrections.",
     "Original (user): the sheet that you gave, unchanged.",
     "",
@@ -1430,7 +1470,8 @@ def finish_workbook(wb: openpyxl.Workbook) -> None:
     guide, review = wb.create_sheet("Guide"), wb.create_sheet("Review")
     write_guide(guide)
     write_review(review, impact, typed_numbers())
-    order = ["Guide", "Review", "Calc", "Merger", "P3DH", "Market", "Peers", "Original (user)"]
+    pack_sheets = [n for n in ("Valuation", "Balance sheet", "P&L", "MREL scenario", "Decisions", "Sources") if n in wb.sheetnames]
+    order = ["Guide", "Review", "Calc", "Merger", *pack_sheets, "P3DH", "Market", "Peers", "Original (user)"]
     wb._sheets = [wb[n] for n in order]
     wb.active = 2
     wb.calculation.fullCalcOnLoad = True

@@ -164,6 +164,8 @@ Pages: Overview, Peer explorer (KM1 by size and geography), Greek banks (against
 
 The page `M&A scenario` combines NBG with up to three banks of P3DH. It runs the formulas of the Excel file `docs/M&A calc v2.xlsx` (sheets Calc and Merger), so the page and the file give the same numbers. Data: P3DH (capital, buffers, MREL, leverage, liquidity, IRRBB) and the Bloomberg tables of the same database (price, consensus, profit, opex, tax rate, rates). A bank without listed shares (BIL, HCOB) is valued with its nearest listed European peers of P3DH (median P/TBV and P/CET1 of the banks with the closest return). The page shows the first-year analysis, a four-year merger model (2026E to 2029E), the regulatory view, sensitivity grids, the issuance needs (CET1, AT1, Tier 2, and MREL layers, with requirements weighted by RWAs, the AT1 and Tier 2 buckets from the P2R, and a subordination assumption from the filings of other banks), the data used (with the average deposit rate for each year, half year, and quarter), and a review of the original sheet. You can download the file with your inputs.
 
+The Excel file also has a deal pack for NBG and BIL: the sheets Valuation (how the P/TBV and P/CET1 comps are derived), Balance sheet, P&L (forward profit of BIL from drivers, with a switch to the flat case), MREL scenario (single and multiple point of entry, with caveats), Decisions, and Sources. See `docs/ma_model.md`.
+
 ```bash
 dashboard/.venv/Scripts/python scripts/build_ma_workbook.py   # build docs/M&A calc v2.xlsx
 dashboard/.venv/Scripts/python scripts/test_ma_workbook.py    # tests (evaluator, identities, data policy, page)
@@ -188,7 +190,8 @@ The tables `ext_*` hold public statistics for every EU country in one schema: ra
 
 ```bash
 python scripts/pull_ext.py all        # 60 curated indicators, about 75 seconds
-python scripts/pull_ext.py bulk       # every series of the ECB sets MIR, BSI, BLS, CBD2, SUP, SSI with the full history (about 5.5 million observations)
+python scripts/pull_ext.py bulk       # every series of the ECB sets MIR, BSI, BLS, CBD2, SUP, SSI, RAI, IRS, RESR, RESH, CLIFS, CISS with the full history (more than 5.5 million observations)
+python scripts/pull_ext.py eba        # EBA Transparency Exercise: bank-by-bank P&L and exposures of 119 banks, last data 30 Jun 2025 (about 230 MB)
 python scripts/pull_ext.py status     # what the database holds
 ```
 

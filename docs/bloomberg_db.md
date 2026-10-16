@@ -61,6 +61,11 @@ A security that was requested before in the same month costs nothing again. New 
 On 14 October 2026 the pulls had used 4,275 securities with a budget of 4,300.
 The search service (the bond census) needs no unique security.
 
+When the real limit is reached, Bloomberg answers every reference-data request with a response error: category `LIMIT`, code `-4002`, source `rsfrdsvc2`, and the text "Workflow review needed". The text has no limit word, so the client reads the category and raises `LimitReached`.
+The pulls then stop with exit code 2. The count in `bbg_security_use` is not the whole use of the terminal: the project `blauto`, the Excel add-in, and other tools count too, so the real limit can come before the budget of the client.
+The project `blauto` (`C:\Users\E40889\Documents\blauto`) uses the same API (blpapi, localhost:8194, the services refdata and instruments) and gets the same answer. Its function `ref_data` stops with an `InvalidArgumentException` instead of a readable message.
+Type `DAPI<GO>` to see the use and the date of the reset. Do not retry before that date: every refused request is still a request.
+
 ## Tables
 
 | Table | Content | Key |
@@ -216,6 +221,20 @@ Limits:
 - The count of issues in `bbg_entity` (`DDIS`) is the count of the ultimate parent and includes loans. BNP Paribas Fortis, BGL, and BNL show the 11,489 issues of BNP Paribas.
 - Bank of Cyprus Holdings shows 1 outstanding bond. The operating bank issues under another legal entity.
 - The amounts of the bonds in other currencies are converted at the latest FX rate. The Austrian schilling uses its fixed rate.
+
+## Issuance workbook
+
+`scripts/build_issuance_excel.py` writes `docs/Issuance NBG and BIL.xlsx` (not in git: it holds Bloomberg data). It reads `bbg_bond`, `bbg_bond_market`, `bbg_bond_listing`, and the FX series. The code is in `modules/bbg/issuance.py` (data) and `modules/bbg/issuance_xlsx.py` (workbook).
+Use `--banks SHORT=LEI ...` for other issuers.
+
+- Sheet `Profile`: for each issuer and for all issuers combined, the amount outstanding in EUR by debt type and by maturity year (ten single years, one open bucket, and perpetual), the number of notes, and a table of public and private amounts.
+  Cell B4 chooses the contractual maturity or the next call date. The cells are SUMIFS and COUNTIFS formulas over the sheet `Issues`, so a change of a class in `Issues` changes the profile.
+- Sheet `Issues`: one row for each bond, active or not, with the fields of the database, the amount in EUR, and the latest quote.
+- Sheet `Listed without data`: live names of the census that have no row in `bbg_bond` (ambiguous, not found, or listed after the last pull), with the coupon and the maturity read from the name.
+- Debt type: AT1, Tier 2, senior non-preferred, senior preferred, covered bond, senior unsecured programme notes, and structured and private notes. The rules are in `debt_type` and in the Read me sheet. Bloomberg has no field for a structured note: the class is a rule on the rank, the coupon type, the maturity type, and the programme.
+- Public or private: a note with the series EMTN, GMTN, or DMTN is public. A note outside a programme is public from EUR 150m (`UNIVERSE_MIN_EUR`). All others are private.
+- The notes that are listed without data are not in the amounts. Load them with `pull_bloomberg.py bonds --leis <LEI>`. This needs the terminal and unique securities of the monthly budget.
+- The tests (`scripts/test_bbg.py`, section 3e) use invented bonds. They check the rules, and every Profile cell against pandas with the library `formulas` (install it to run that part).
 
 ## MREL templates against the bonds
 

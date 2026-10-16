@@ -14,11 +14,12 @@ import pandas as pd
 
 Query = Callable[..., pd.DataFrame]
 YEARS = (2026, 2027, 2028, 2029)
-CONS_METRICS = {"NI": "BEST_NET_INCOME", "EPS": "BEST_EPS", "DPS": "BEST_DPS", "SALES": "BEST_SALES", "OPP": "BEST_OPP"}
+CONS_METRICS = {"NI": "BEST_NET_INCOME", "EPS": "BEST_EPS", "DPS": "BEST_DPS", "SALES": "BEST_SALES", "OPP": "BEST_OPP", "ROE": "BEST_ROE", "BPS": "BEST_BPS"}
 OIS_LABELS = ["1W", "2W", "3W", "1M", "2M", "3M", "6M", "9M", "10M", "1Y", "2Y", "3Y", "4Y", "5Y", "6Y", "7Y", "10Y"]
 EUROPE = {"AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "HU", "IE", "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK", "SI", "ES", "SE",
           "IS", "LI", "NO", "GB", "CH"}
 PTBV_RANGE = (0.15, 6.0)
+PCET1_RANGE = (0.15, 6.0)  # the sheet text said 0.2; the code has always used 0.15 for both multiples: the text now says 0.15
 ROTE_RANGE = (-0.10, 0.60)
 
 
@@ -102,45 +103,76 @@ def peer_exclusion(name: str, relationship: str | None, parent_name: str | None,
     return None
 
 
+SCALE_RANGE = (0.5, 2.0)  # P3DH TREA / Bloomberg RWA: a bank outside this range has a scale or currency error in one of the two sources (the audit found CSOB, Millennium, SG Luxembourg)
+
+
 def peers(query: Query, countries: set[str] | None = None) -> dict[str, Any]:
     """Listed banks of P3DH with four numbers each:
-    P/TBV and RoTE from per-share values (price / tangible book, trailing EPS / tangible book),
-    P/CET1 and RoCET1 from the market cap in EUR, the trailing profit (EPS x shares), and CET1 of the newest KM1 filing in P3DH.
+    P/TBV and RoTE from per-share values, P/CET1 and RoCET1 from the market cap in EUR and CET1 of the newest KM1 filing in P3DH.
+    Currency: the per-share fields of Bloomberg (book value, tangible book value, EPS) are in EUR, but PX_LAST is in the currency of the stock.
+    So P/TBV is Bloomberg's price to book ratio x book value / tangible book value (the ratio is the same in any currency), and RoCET1 is P/CET1 x EPS / price in EUR,
+    where the price in EUR is P/TBV x tangible book value.
+    Scale guard: a bank whose KM1 TREA in P3DH is less than half or more than twice the RWA of Bloomberg is not used. It is listed in "removed" with the reason "scale mismatch".
     Only European banks by default. A bank with a number outside the ranges, or without CET1, is left out.
     Subsidiaries, cooperatives, and specialists are left out too (peer_exclusion). They are listed in "removed" with the reason."""
     countries = EUROPE if countries is None else countries
-    d = query("""SELECT e.lei, e.name, e.country_iso AS country, e.market_ticker AS ticker, e.parent_relationship, e.parent_name,
-                        (SELECT value FROM bbg_equity_snapshot s WHERE s.ticker = e.market_ticker AND s.field = 'INDUSTRY_SUBGROUP' ORDER BY pull_date DESC LIMIT 1) AS subgroup,
-                        (SELECT value FROM bbg_equity_snapshot s WHERE s.ticker = e.market_ticker AND s.field = 'PX_LAST' ORDER BY pull_date DESC LIMIT 1) AS px,
-                        (SELECT value FROM bbg_equity_snapshot s WHERE s.ticker = e.market_ticker AND s.field = 'TANG_BOOK_VAL_PER_SH' ORDER BY pull_date DESC LIMIT 1) AS tbvps,
-                        (SELECT value FROM bbg_equity_snapshot s WHERE s.ticker = e.market_ticker AND s.field = 'TRAIL_12M_EPS' ORDER BY pull_date DESC LIMIT 1) AS eps,
-                        (SELECT value FROM bbg_equity_snapshot s WHERE s.ticker = e.market_ticker AND s.field = 'CRNCY' ORDER BY pull_date DESC LIMIT 1) AS ccy,
+
+    def snap(field: str, alias: str) -> str:
+        return f"(SELECT value FROM bbg_equity_snapshot s WHERE s.ticker = e.market_ticker AND s.field = '{field}' ORDER BY pull_date DESC LIMIT 1) AS {alias}"
+
+    d = query(f"""SELECT e.lei, e.name, e.country_iso AS country, e.market_ticker AS ticker, e.parent_relationship, e.parent_name, e.rwa AS bbg_rwa,
+                        {snap('INDUSTRY_SUBGROUP', 'subgroup')}, {snap('BOOK_VAL_PER_SH', 'bvps')}, {snap('PX_TO_BOOK_RATIO', 'p2b')},
+                        {snap('TANG_BOOK_VAL_PER_SH', 'tbvps')}, {snap('TRAIL_12M_EPS', 'eps')}, {snap('CRNCY', 'ccy')},
                         (SELECT mkt_cap_eur FROM bbg_equity_daily x WHERE x.ticker = e.market_ticker AND x.mkt_cap_eur IS NOT NULL ORDER BY date DESC LIMIT 1) AS mcap,
                         (SELECT MAX(pull_date) FROM bbg_equity_snapshot s WHERE s.ticker = e.market_ticker) AS pull_date
                  FROM bbg_entity e WHERE e.found = 1 AND e.market_basis = 'self'""")
-    km1 = query("""SELECT entity_key, period_end, value FROM clean_period_fact WHERE template_code = 'K_61.00' AND measure_col = 10 AND row_code = '0010' AND value IS NOT NULL""")
+    km1 = query("""SELECT entity_key, period_end, row_code, value FROM clean_period_fact WHERE template_code = 'K_61.00' AND measure_col = 10 AND row_code IN ('0010', '0040') AND value IS NOT NULL""")
     cet1: dict[str, float] = {}
+    trea: dict[str, float] = {}
     if not km1.empty:
-        newest = pd.Timestamp(km1["period_end"].max()) - pd.Timedelta(days=400)
-        km1 = km1[pd.to_datetime(km1["period_end"]) >= newest].sort_values("period_end").groupby("entity_key").tail(1)
-        cet1 = dict(zip(km1["entity_key"], km1["value"]))
+        have = km1[km1["row_code"] == "0010"]
+        newest = pd.Timestamp(have["period_end"].max()) - pd.Timedelta(days=400)
+        have = have[pd.to_datetime(have["period_end"]) >= newest].sort_values("period_end").groupby("entity_key").tail(1)
+        cet1 = dict(zip(have["entity_key"], have["value"]))
+        t = km1[km1["row_code"] == "0040"].merge(have[["entity_key", "period_end"]], on=["entity_key", "period_end"])  # TREA of the same filing as CET1
+        trea = dict(zip(t["entity_key"], t["value"]))
     rows, removed = [], []
+    n_europe = n_inputs = n_scale = n_range = 0  # counts of the funnel: how many banks pass each step
     for r in d.itertuples():
-        px, tb, eps, mcap, c1 = _f(r.px), _f(r.tbvps), _f(r.eps), _f(r.mcap), _f(cet1.get(r.lei))
-        if r.country not in countries or r.ccy == "GBp" or None in (px, tb, eps, mcap, c1) or tb <= 0 or px <= 0 or c1 <= 0:
+        px_ok = _f(r.p2b)
+        bv, tb, eps, mcap, c1 = _f(r.bvps), _f(r.tbvps), _f(r.eps), _f(r.mcap), _f(cet1.get(r.lei))
+        if r.country not in countries or r.ccy == "GBp":
             continue
-        ptbv, rote = px / tb, eps / tb
-        pcet1, rocet1 = mcap / c1, mcap * eps / px / c1
-        if PTBV_RANGE[0] < ptbv < PTBV_RANGE[1] and PTBV_RANGE[0] < pcet1 < PTBV_RANGE[1] and ROTE_RANGE[0] < rote < ROTE_RANGE[1] and ROTE_RANGE[0] < rocet1 < ROTE_RANGE[1]:
+        n_europe += 1
+        if None in (px_ok, bv, tb, eps, mcap, c1) or tb <= 0 or bv <= 0 or px_ok <= 0 or c1 <= 0:
+            continue
+        n_inputs += 1
+        ptbv, rote = px_ok * bv / tb, eps / tb
+        pcet1 = mcap / c1
+        rocet1 = pcet1 * eps / (ptbv * tb)  # EPS / price in EUR x market cap / CET1
+        rec = {"lei": r.lei, "name": r.name, "country": r.country, "ticker": r.ticker, "ptbv": ptbv, "rote": rote, "pcet1": pcet1, "rocet1": rocet1}
+        t_, rwa = _f(trea.get(r.lei)), _f(r.bbg_rwa)
+        if t_ and rwa and not SCALE_RANGE[0] < t_ / 1e6 / rwa < SCALE_RANGE[1]:
+            removed.append({**rec, "reason": "scale mismatch", "parent": r.parent_name})
+            continue
+        n_scale += 1
+        if PTBV_RANGE[0] < ptbv < PTBV_RANGE[1] and PCET1_RANGE[0] < pcet1 < PCET1_RANGE[1] and ROTE_RANGE[0] < rote < ROTE_RANGE[1] and ROTE_RANGE[0] < rocet1 < ROTE_RANGE[1]:
+            n_range += 1
             why = peer_exclusion(r.name, r.parent_relationship, r.parent_name, r.subgroup)
-            rec = {"lei": r.lei, "name": r.name, "country": r.country, "ticker": r.ticker, "ptbv": ptbv, "rote": rote, "pcet1": pcet1, "rocet1": rocet1}
             if why:
                 removed.append({**rec, "reason": why, "parent": r.parent_name})
             else:
                 rows.append(rec)
     rows.sort(key=lambda x: (x["country"], x["name"]))
     removed.sort(key=lambda x: (x["reason"], x["country"], x["name"]))
-    return {"rows": rows, "removed": removed, "pull_date": None if d.empty else d["pull_date"].max()}
+    by_reason = {k: sum(1 for x in removed if x["reason"] == k) for k in ("subsidiary", "cooperative", "specialist")}
+    funnel = [("Banks of Bloomberg with their own listed shares, linked to P3DH by the LEI", len(d)),
+              ("In a European country and not quoted in pence", n_europe),
+              ("All inputs present and above 0: price to book ratio, book value, tangible book value, EPS, market cap, CET1", n_inputs),
+              ("Scale of P3DH and Bloomberg agree (TREA / RWA between 0.5 and 2)", n_scale),
+              ("P/TBV and P/CET1 between 0.15x and 6x, returns between -10% and 60%", n_range),
+              ("Peers: not a subsidiary, cooperative, or specialist", len(rows))]
+    return {"rows": rows, "removed": removed, "funnel": funnel, "removed_by_reason": by_reason, "pull_date": None if d.empty else d["pull_date"].max()}
 
 
 def _label(kind: str, end: str) -> str:

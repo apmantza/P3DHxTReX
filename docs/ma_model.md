@@ -16,6 +16,10 @@ So each number on the page is a cell of the Excel file.
 | `dashboard/ma_sheet.py` | Evaluator for Excel formulas (SUM, AVERAGE, MAX, MIN, IF, IFERROR, CHOOSE, COUNT, MEDIAN, SLOPE, INTERCEPT, RSQ, ABS, AND, OR, NOT, ROUND, TEXT). |
 | `dashboard/ma_data.py` | Reads the P3DH clean layer (KM1, OV1, CC1, CC2, KM2, LR1, IRRBB1, AE1, CR1) for one bank and one quarter. |
 | `dashboard/ma_market.py` | Reads the Bloomberg tables of the database (`bbg_*`) for the four banks, the nearest peers, and the deposit rates. Links to P3DH by the LEI. |
+| `dashboard/ma_pack_data.py` | Reads the data of the deal pack for NBG and the first target: OR2 lines, EBA Transparency Exercise lines, CC2 balance sheet, CR1 detail, bonds by rank, ECB drivers of Luxembourg, and the static grids. |
+| `dashboard/ma_pack.py` | Writes the sheets Valuation, Balance sheet, Decisions, and Sources, and calls the writers of the other two pack sheets. |
+| `dashboard/ma_pack_pnl.py` | Writes the sheets P&L and MREL scenario. |
+| `dashboard/ma_pack_base.py` | Styles, the row writer, and the fixed layout of the BIL forward block on the sheet P&L. |
 | `scripts/build_ma_workbook.py` | Builds the Excel file. You can choose three other targets. |
 | `scripts/pull_bloomberg.py` | Pulls Bloomberg data into the database. See `docs/bloomberg_db.md`. |
 | `scripts/test_ma_workbook.py` | Tests of the evaluator, the workbook, the identities, the data policy, and the page. |
@@ -28,6 +32,7 @@ So each number on the page is a cell of the Excel file.
 - **P3DH**: the data of the EBA Pillar 3 Data Hub, with the period and the quality of each value.
 - **Market**: Bloomberg data from the database, one column for each bank (NBG and the three targets): price, shares, market cap, profit, consensus, opex, tax rate. It also holds the ESTR OIS curve and the average deposit rate for each year, half year, and quarter. Do not publish this sheet.
 - **Peers**: the listed European banks of P3DH with P/TBV, P/CET1, and returns. For each target without a market cap it picks the k banks with the closest return and takes the median multiple. Do not publish this sheet.
+- **Valuation**, **Balance sheet**, **P&L**, **MREL scenario**, **Decisions**, **Sources**: the deal pack for NBG and the first target (BIL). See the section "Deal pack" below.
 - **Review**: each finding about the original sheet, the effect of the corrections, and a table of every typed number of the original.
 - **Guide**: how to use the file.
 - **Original (user)**: your sheet, unchanged, with its picture.
@@ -156,9 +161,12 @@ The lever in rows 28 and 29 adds them to CET1 a second time. It is off by defaul
 - A need is the amount to issue. It follows a waterfall: CET1 first, then Tier 1 (AT1), then Tier 2, then eligible liabilities. An instrument that is issued for one layer also counts for the next layers.
   At the requirements the need is the shortfall against requirement x RWAs (rows 187 to 192). At the targets it is the shortfall against the CET1 target D1 and the MREL target D2 (rows 193 to 195).
 - CET1 of the combination (row 20) already carries the goodwill. A cash payment reduces CET1 one for one. A share payment leaves it unchanged, because the new goodwill is deducted against the new equity. Rows 199 to 201 show the goodwill, its effect in basis points of RWAs, and the CET1 change compared with NBG alone.
-- The AT1, Tier 2, and eligible liabilities of the target stay outstanding and count in the group stack (rows 22 to 24 and 154 and 155). N19 sets the share that counts (default 100%).
-  Rows 196 to 198 show the need at the MREL target if none of them counted, and the mitigation. A caution: the instruments of a subsidiary count at group level in part (CRR Articles 83 to 88),
-  and as external MREL only if the subsidiary is a resolution entity. Otherwise they are internal MREL. Test this with N19.
+- The AT1 and Tier 2 of the target are own funds. They count in the group stack (rows 22 and 23) at the recognition of CRR Article 87 (row 233) times the share in N19 (default 100%).
+  The recognition = 1 - surplus / gross capital items. The surplus is the own funds of the target above the lower of its own requirement and the requirement that the group has for it (row 102 of NBG on the RWAs of the target).
+  The gross capital items are the common equity before adjustments (CC1) plus AT1 plus Tier 2. The factor applies to every part of the target that outside investors hold.
+- The senior debt of the target counts at N26 (default 0%). Only liabilities that the resolution entity issues count as external MREL (SRB MREL policy, paragraph 111; CRR Article 72b(2)(a)).
+  Under a single point of entry the senior debt of BIL counts nowhere: it is not external MREL of the group, and it is not internal MREL of BIL. Set N26 to 100% to see the case in which BIL is its own resolution entity.
+  Rows 196 to 198 show the need at the MREL target if none of them counted, and the mitigation.
 
 **Buckets for AT1 and Tier 2** (rows 203 to 222). CRR Article 104a lets a bank meet the P2R with at most 18.75% AT1 and 25% Tier 2 (56.25% must be CET1). The largest AT1 bucket is the Pillar 1 AT1 (1.5%) plus 18.75% of the P2R.
 The largest Tier 2 bucket is 2% plus 25% of the P2R. The P2R is the P2R weighted by RWAs (row 92). Rows 212 and 213 give the room that is left in each bucket, and rows 214 and 215 the instruments above the buckets (they count for the MREL, not for the capital requirement).
@@ -195,6 +203,33 @@ The layout follows Figure 89. Capital is in EUR bn. Profit is in EUR m. The deal
 - A year with consensus uses it (net income, revenue, revenue less operating profit as cost). A year without consensus grows from the year before (profit: growth input, costs and revenue: cost growth input).
   A target without consensus in year 1 (BIL, HCOB) starts from the net income of the last 12 months and the opex of the last fiscal year. Revenue = costs / cost-income ratio (input).
   Bank of Cyprus has consensus for 3 years. Year 4 grows from year 3.
+- Deal 1 (BIL) has a switch on the sheet P&L (cell B4). At 1 (default) the revenue, costs, and net profit of BIL come from the driver block of the sheet P&L. At 0 the rules of the lines above apply, as before the deal pack existed.
+  The switch changes deal 1 only. A test checks that the Merger sheet with the switch at 0 equals the Merger sheet of a workbook without the pack.
+
+## Deal pack
+
+The pack answers four questions for NBG and BIL: how the comps are derived, what the combined balance sheet looks like, what the combined P&L looks like, and what the combined MREL scenario is.
+It reads the same levers as Calc. The pack sheets exist only when the market data holds a pack (`market["pack"]`, made by `ma_pack_data.load`). A missing part is named on the sheet Sources.
+The pack is written only when BIL is the first target: the labels, the Luxembourg drivers of the ECB, and the forward profit drivers are those of BIL. With another first target the workbook has no pack sheets and the Merger sheet keeps its old rules.
+
+The Streamlit page has a tab `MREL scenario` that shows the sheet MREL scenario: requirement, resources, the Article 87 recognition, the result by strategy, a chart of the issuance need, a grid of the need against the share of the AT1, Tier 2, and senior debt of BIL that counts, and the caveats.
+The sidebar block "Deal pack" sets the resolution strategy (single or multiple point of entry), the add-on for the stake under multiple points of entry, and the forward profit of BIL (drivers or flat).
+
+- **Valuation.** Definitions, the peer funnel with counts, the inputs of BIL, the comps (median multiple of the nearest peers, the cost of equity that they imply, the factor, the value on each basis), and the value by method.
+  The methods are: P/TBV and P/CET1 before and after the cost of equity factor, the value used in the model, the Gordon model on the trailing and on the driver-based return, the P/E of NBG (reference), and the deal price.
+  Each method shows its P/TBV, P/CET1, P/E, and the price for the stake with the premium. A live table varies the cost of equity. Two static tables (marked STATIC) vary k and g. A third table checks the cost of equity that the peers imply by three routes.
+- **Balance sheet.** NBG, BIL, the simple sum, and the pro forma of deal 1: capital, requirements, distance to the MDA trigger, leverage, liquidity, MREL, RWAs by type, non-performing loans and coverage, loans by counterparty, IRRBB,
+  the CC2 balance sheet lines (each side ties to the total within 2%), the Bloomberg bonds by rank (EUR only), and the reference dates.
+- **P&L.** History of both banks (OR2 lines of P3DH and the EBA Transparency Exercise), the consensus of NBG, and the combined P&L from the Merger sheet. For BIL it has a driver block:
+  net interest income = previous + volume effect (loan growth) + rate effect (IRRBB1 sensitivity x change of the deposit rate path) + margin effect; fees and costs grow at inputs; impairment = cost of risk x average loans; tax at the rate of Calc.
+  The inputs are judgments. The margin default comes from the ECB spread of new corporate loans in Luxembourg. A check row compares the base year of the lines with the trailing profit.
+- **MREL scenario.** Requirement and resources of NBG, BIL, and the combination; the Article 87 recognition; the result under a single point of entry (surplus or shortfall, issuance need, stranded senior debt, internal MREL of BIL)
+  and under multiple points of entry (BIL alone, NBG alone with an add-on for the stake); the strategy switch (B4); and a register of caveats, each marked Verified, Inference, or Unverified.
+- **Decisions.** The open choices, each with its lever, its value now, and its effect now (live links).
+- **Sources.** The source, date, and limit of each item, and the data caveats from the audit of the database.
+
+The static tables are not live: they use the default k (20) and cost of equity (10%) and do not follow the levers.
+The tests check the pack against independent calculations (numpy), against Calc, and against the Merger sheet. They also check that both formula engines agree.
 
 ## The review of the original sheet
 
@@ -219,7 +254,12 @@ Valuation of BIL and HCOB: your sheet used 0.926x tangible equity for BIL (EUR 2
 
 - The model shows one year (Calc) and four years (Merger). It does not model dividends in detail, DTC amortisation, or deposit flows.
 - Consensus for the last year has few brokers. The net profit and EPS consensus of that year do not always match, so the share count that follows from them can jump.
-- The issuance needs use the pro forma stack of the combination. The instruments of the target count in full unless N19 is lower (see above).
+- The issuance needs use the pro forma stack of the combination. The AT1 and Tier 2 of the target count at the Article 87 recognition times N19. The senior debt of the target counts at N26 (default 0%).
+- The Article 87 factor uses the lower of two requirements. The authority can allow the higher one (Article 87(1), last subparagraph). Whether it does is open.
+- The forward profit of BIL is a judgment: BIL has no consensus. The drivers are inputs on the sheet P&L. The cost of risk varies a lot from year to year.
+- The EBA Transparency Exercise ends on 30 June 2025. The EBA has stopped it. The pack uses it as history only.
+- The CC2 lines of BIL can have an older reference date than KM1. The sheet Balance sheet shows both dates.
+- The date of the EUR 100bn test, the way the SRB treats the stake in BIL under multiple points of entry, and the terms of the BIL senior instruments are not verified.
 - The assumed subordination requirement is a rule of thumb from the filings of other banks, not a decision of a resolution authority.
 - The senior surplus counts all CET1 towards MREL. CET1 used for the combined buffer does not count. The surplus is too high by the combined buffer.
 - HCOB files no KM2 or TLAC1 in P3DH, so its MREL line has capital only.
@@ -239,6 +279,7 @@ Valuation of BIL and HCOB: your sheet used 0.926x tangible equity for BIL (EUR 2
 ```
 .venv/Scripts/python scripts/refresh_p3dh.py                 # P3DH data and clean layer
 C:\Users\E40889\Documents\blauto\.venv\Scripts\python scripts/pull_bloomberg.py rates      # Bloomberg (terminal must run). See docs/bloomberg_db.md
+dashboard/.venv/Scripts/python scripts/pull_ext.py all       # ECB and Eurostat data; then: bulk, eba. See docs/external_statistics.md
 dashboard/.venv/Scripts/python scripts/build_ma_workbook.py   # docs/M&A calc v2.xlsx
 dashboard/.venv/Scripts/python scripts/test_ma_workbook.py    # tests (the check with the library formulas needs: pip install formulas)
 dashboard/.venv/Scripts/python scripts/test_bbg.py            # tests of the Bloomberg modules

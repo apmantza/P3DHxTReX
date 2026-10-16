@@ -117,6 +117,18 @@ class Client:
         if any(w in low for w in LIMIT_WORDS) and ("data" in low or "daily" in low or "monthly" in low or "capacity" in low):
             raise LimitReached(text)
 
+    @classmethod
+    def _response_error(cls, err) -> RuntimeError:
+        """The error of a failed request. Bloomberg marks its data limit with category LIMIT (code -4002) and the text 'Workflow review needed', which holds no limit word,
+        so the category decides. Raises LimitReached for it. Returns the error to raise for any other failure."""
+        msg = err.getElementAsString("message")
+        category = err.getElementAsString("category") if err.hasElement("category") else ""
+        code = err.getElementAsString("code") if err.hasElement("code") else ""
+        if category.upper() == "LIMIT":
+            raise LimitReached(f"Bloomberg data limit (category LIMIT, code {code}): {msg.strip()}. Check DAPI<GO> on the terminal. The limit is per month.")
+        cls._check_limit(msg)
+        return RuntimeError(msg)
+
     # ------------------------------------------------------------------------------ reference data
     def ref(self, securities: list[str], fields: list[str], overrides: dict[str, Any] | None = None, chunk: int = 100, fchunk: int = 25) -> dict[str, dict[str, Any]]:
         """Static and snapshot fields. Returns {security: {field: value}}. A failed security has the key _error."""
@@ -144,9 +156,7 @@ class Client:
         for m in self._send(req):
             if not m.hasElement("securityData"):
                 if m.hasElement("responseError"):
-                    msg = m.getElement("responseError").getElementAsString("message")
-                    self._check_limit(msg)
-                    raise RuntimeError(msg)
+                    raise self._response_error(m.getElement("responseError"))
                 continue
             arr = m.getElement("securityData")
             for i in range(arr.numValues()):
@@ -191,9 +201,7 @@ class Client:
                 o.setElement("value", str(v))
             for m in self._send(req):
                 if m.hasElement("responseError"):
-                    msg = m.getElement("responseError").getElementAsString("message")
-                    self._check_limit(msg)
-                    raise RuntimeError(msg)
+                    raise self._response_error(m.getElement("responseError"))
                 if not m.hasElement("securityData"):
                     continue
                 sd = m.getElement("securityData")

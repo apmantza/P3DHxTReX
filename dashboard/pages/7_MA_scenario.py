@@ -37,6 +37,7 @@ def fmt(v, kind: str) -> str:
         return "n/a"
     f = {"pct": lambda x: f"{x * 100:.1f}%", "pct2": lambda x: f"{x * 100:.2f}%", "bn": lambda x: f"{x:,.2f}", "x": lambda x: f"{x:.2f}x",
          "bp": lambda x: f"{x + 0.0:,.0f}", "int": lambda x: f"{x:,.0f}", "eps": lambda x: f"{x:.2f}", "0.0000": lambda x: f"{x:.4f}",
+         "f3": lambda x: f"{x:.3f}", "m1": lambda x: f"{x:,.1f}",
          "flag": lambda x: "yes" if x >= 1 else "NO", "text": str}.get(kind, lambda x: f"{x:.2f}")
     return f(v)
 
@@ -95,10 +96,10 @@ def build_model(tk: tuple, asof: str, stamp: float):
     deals = [W.default_deal(b, sl["lei"]) for b, sl in zip(banks[1:], market["slots"][1:])]
     g = W.default_globals()
     wb = W.build_workbook(banks, deals, g, market, with_original=False)
-    return banks, deals, g, market, ma_sheet.Model.from_openpyxl(wb)
+    return banks, deals, g, market, ma_sheet.Model.from_openpyxl(wb), wb
 
 
-banks, deals, g, market, model = build_model(tuple(tkeys), as_of, lib.db_stamp())
+banks, deals, g, market, model, model_wb = build_model(tuple(tkeys), as_of, lib.db_stamp())
 age = ma_market.age_days(market["pulled"])
 if age is not None and age > 7:
     st.info(f"The Bloomberg data is {age} days old. Run scripts/pull_bloomberg.py to refresh it.")
@@ -138,8 +139,10 @@ with st.sidebar.expander("Targets and ratios", expanded=True):
            help_="Used for a combination that reaches the asset limit below when no requirement is filed. 13.5% is the most frequent value of banks of EUR 100bn to 250bn in P3DH.")
     number("Assets from which the assumption applies (EUR bn)", "Calc", "N21", 1, "%.0f", 10.0, minv=0.0)
     number("Floor of the subordination requirement (% of the leverage exposure)", "Calc", "N22", 100, "%.1f", 0.5, minv=0.0, maxv=15.0)
-    number("Share of the target's AT1, Tier 2, and eligible liabilities that count in the group (%)", "Calc", "N19", 100, "%.0f", 10.0, minv=0.0, maxv=100.0,
-           help_="100% = all count. A subsidiary's instruments count at group level in part (CRR Articles 83 to 88), and as external MREL only if it is a resolution entity.")
+    number("Share of the target's AT1 and Tier 2 that counts in the group (%)", "Calc", "N19", 100, "%.0f", 10.0, minv=0.0, maxv=100.0,
+           help_="100% = as CRR Article 87 recognises them in consolidated own funds (sheet Calc, row 233: about 78% for BIL). 0% = none.")
+    number("Share of the target's eligible liabilities (senior) that counts in the group (%)", "Calc", "N26", 100, "%.0f", 10.0, minv=0.0, maxv=100.0,
+           help_="0% = single point of entry: only liabilities that the resolution entity issues count (SRB MREL policy, paragraph 111). 100% = all count, as if the target were its own resolution entity.")
     number("Nearest listed peers for a bank without a market cap (k)", "Calc", "N17", 1, "%.0f", 1.0, minv=5.0, maxv=50.0, help_="Median multiple of the k listed banks with the closest return (sheet Peers).")
     number("Valuation basis of such a bank (1 tangible equity, 2 CET1, 3 average)", "Calc", "N18", 1, "%.0f", 1.0, minv=1.0, maxv=3.0,
            help_="CET1 is below tangible equity by the other CET1 deductions. 3 takes the average of both values.")
@@ -160,6 +163,26 @@ with st.sidebar.expander("NBG"):
     number("Change of NBG RWAs after the deal (%)", "Calc", "D65", 100, "%.1f", 0.5)
     number("Integration cost, % of target opex", "Calc", "N4", 100, "%.1f", 1.0)
     number("Integration cost, years", "Calc", "N5", 1, "%.0f", 1.0)
+MREL = "MREL scenario"
+has_pack = (MREL, "B4") in model.cells
+
+
+def find_row(sheet: str, prefix: str, first: int = 1, last: int = 250) -> int:
+    for r in range(first, last + 1):
+        v = base.get(sheet, f"A{r}")
+        if isinstance(v, str) and v.startswith(prefix):
+            return r
+    raise KeyError(prefix)
+
+
+if has_pack:
+    with st.sidebar.expander("Deal pack: MREL strategy and BIL forecast"):
+        ov[(MREL, "B4")] = st.selectbox("Resolution strategy of the group", [1, 2], format_func={1: "Single point of entry (NBG)", 2: "Multiple points of entry"}.get, key="ma_strategy",
+                                        help="The SRB decides, not the bank. The tab MREL scenario shows both strategies. This choice sets the selected result and the instruments that NBG must buy in BIL.")
+        number("Add-on of the NBG requirement for the stake in BIL, multiple points of entry (% of the price)", "MREL scenario", f"C{find_row(MREL, 'Add-on of the NBG requirement')}", 100, "%.0f", 10.0, minv=0.0, maxv=200.0,
+               help_="The SRB policy raises the MREL for exposures between resolution groups (paragraphs 41 and 42). The size of the add-on is a judgment. 0 = none.")
+        ov[("P&L", "B4")] = st.selectbox("Forward profit of the first target", [1, 0], format_func={1: "From the drivers (sheet P&L)", 0: "Flat at the trailing profit"}.get, key="ma_bil_switch",
+                                         help="The first target (BIL) has no analyst consensus. The drivers are inputs on the sheet P&L of the Excel file. The switch feeds the four-year model of deal 1.")
 for i, (c, x) in enumerate(zip(W.TGT, W.COMBOS)):
     t, d, sl = banks[i + 1], deals[i], market["slots"][i + 1]
     with st.sidebar.expander(f"Deal {i + 1}: {t.name[:34]}", expanded=(i == 0)):
@@ -254,7 +277,7 @@ if val("Calc", "D151") != "OK":
            if any(isinstance(val("Calc", f"{c}{r}"), float) and val("Calc", f"{c}{r}") < 1 for c in "DEFGHIJ")]
     st.warning("Checks: " + "; ".join(bad) + ". See the tab Review and data.")
 
-tabs = st.tabs(["M&A analysis", "Four-year model", "Capital, liquidity, MREL", "Issuance needs", "Sensitivity", "Review and data", "Excel file"])
+tabs = st.tabs(["M&A analysis", "Four-year model", "Capital, liquidity, MREL", "Issuance needs", "MREL scenario", "Sensitivity", "Review and data", "Excel file"])
 
 # ---------------------------------------------------------------------------------------- tab 1
 with tabs[0]:
@@ -331,7 +354,7 @@ with tabs[3]:
     tgt = pd.DataFrame([{"deal": nm, "layer": lay, "EUR bn": val("Calc", f"{c}{row}")} for nm, c in deals_n for lay, row in (("CET1 to the CET1 target", 193), ("Eligible liabilities to the MREL target", 194))])
     c2.plotly_chart(px.bar(tgt, x="deal", y="EUR bn", color="layer", title="Issuance need at the targets (EUR bn)"), width="stretch")
     mit = pd.DataFrame([{"deal": header[x], "case": case, "EUR bn": val("Calc", f"{x}{row}")} for x in W.COMBOS
-                        for case, row in (("The instruments of the target count (N19)", 194), ("None of them counts", 197))])
+                        for case, row in (("The instruments of the target count (N19 and N26)", 194), ("None of them counts", 197))])
     st.plotly_chart(px.bar(mit, x="deal", y="EUR bn", color="case", barmode="group", title="MREL issuance need at the target: effect of the capital structure of the target (EUR bn)"), width="stretch")
     st.markdown("**Issuance need at the targets for one deal** (the larger of the need at the targets and at the requirements, row 195)")
     which_n = st.radio("Deal  ", list(range(3)), horizontal=True, format_func=lambda i: header[W.COMBOS[i]], key="need_deal")
@@ -376,8 +399,68 @@ with tabs[3]:
 
     st.caption("The needs use the CET1 of the combination (row 20). A cash payment reduces it one for one. A share payment leaves it unchanged, because the new goodwill is deducted against the new equity.")
 
-# ---------------------------------------------------------------------------------------- tab 4
+# ---------------------------------------------------------------------------------------- MREL scenario (deal pack)
+NF = {"0.0%": "pct", "0.00%": "pct2", "0.00": "bn", '0.00"x"': "x", "0": "int", "#,##0": "int", "#,##0.0": "m1", "0.000": "f3", "@": "text"}
+
+
+def sheet_block(sheet: str, head: str, cols: list[str]) -> pd.DataFrame:
+    """The rows under the header row that starts with `head` on a pack sheet, up to the first row without a label. Formats follow the cells of the workbook."""
+    r0 = find_row(sheet, head)
+    names = ["Item"] + [str(val(sheet, f"{c}{r0}") or c) for c in cols]
+    rows, r = [], r0 + 1
+    while val(sheet, f"A{r}") is not None:
+        row = {names[0]: str(val(sheet, f"A{r}"))}
+        for n, c in zip(names[1:], cols):
+            row[n] = fmt(val(sheet, f"{c}{r}"), NF.get(model_wb[sheet][f"{c}{r}"].number_format, "bn"))
+        rows.append(row)
+        r += 1
+    return pd.DataFrame(rows)
+
+
 with tabs[4]:
+    if not has_pack:
+        st.info("The MREL scenario needs the deal pack. It exists when the first target is Banque Internationale a Luxembourg (BIL) and the Bloomberg tables are loaded.")
+    else:
+        mv = lambda prefix, col: val(MREL, f"{col}{find_row(MREL, prefix)}")  # noqa: E731
+        spe = int(ov[(MREL, "B4")]) == 1
+        st.markdown("**MREL scenario of NBG + BIL** (sheet MREL scenario of the Excel file)")
+        st.caption("The SRB chooses the resolution strategy, not the bank. Under a single point of entry (SPE) NBG is the resolution entity and BIL is a subsidiary: only liabilities that NBG issues count as external MREL, "
+                   "and BIL needs internal MREL that NBG buys. Under multiple points of entry (MPE) BIL stays its own resolution entity. "
+                   f"Selected in the sidebar: **{'single point of entry' if spe else 'multiple points of entry'}**. All amounts in EUR bn.")
+        st.markdown("**A. Requirement**")
+        show(sheet_block(MREL, "A. Requirement", ["B", "C", "D"]))
+        st.markdown("**B. Resources**")
+        show(sheet_block(MREL, "B. Resources", ["B", "C", "D"]))
+        res = pd.DataFrame([{"group": nm, "layer": lab, "EUR bn": mv(pref, col)} for nm, col in (("NBG", "B"), ("BIL", "C"), ("NBG + BIL", "D"))
+                            for lab, pref in (("CET1", "CET1"), ("AT1", "AT1 ("), ("Tier 2", "Tier 2 ("), ("Eligible liabilities (senior)", "Eligible liabilities ("))])
+        fig = px.bar(res, x="group", y="EUR bn", color="layer", title="MREL resources by layer and the requirement with the buffer (EUR bn)")
+        req_x, req_y = ["NBG", "BIL", "NBG + BIL"], [mv("MREL requirement with the combined buffer (EUR bn)", c) for c in "BCD"]
+        fig.add_trace(go.Scatter(x=req_x, y=req_y, mode="markers", name="Requirement with the buffer", marker=dict(symbol="line-ew", size=60, line=dict(width=3, color="black"))))
+        st.plotly_chart(fig, width="stretch")
+        st.markdown("**C. Recognition of the AT1 and Tier 2 of BIL in the own funds of the group (CRR Article 87)**")
+        show(sheet_block(MREL, "C. Recognition", ["B"]))
+        st.markdown("**D. Result by strategy**")
+        show(sheet_block(MREL, "D. Result by strategy", ["B", "C", "D"]))
+        need = pd.DataFrame([{"case": "SPE, at the requirements", "EUR bn": mv("Issuance need at the requirements (Calc row 192", "B")},
+                             {"case": "SPE, at the targets D1 and D2", "EUR bn": mv("Issuance need at the targets D1 and D2", "B")},
+                             {"case": "MPE, at the requirements (two groups)", "EUR bn": mv("Issuance need of the two groups together", "C")}])
+        n1, n2 = st.columns(2)
+        n1.plotly_chart(px.bar(need, x="case", y="EUR bn", title="Issuance need by strategy (EUR bn)"), width="stretch")
+        rec = pd.DataFrame([{"AT1 and Tier 2 of BIL": "Recognised in the group", "EUR bn": mv("Recognised in the own funds of the group", "B")},
+                            {"AT1 and Tier 2 of BIL": "Not recognised (Article 87)", "EUR bn": mv("Not recognised", "B")}])
+        n2.plotly_chart(px.bar(rec, x="AT1 and Tier 2 of BIL", y="EUR bn", title="AT1 and Tier 2 of BIL in the own funds of the group (EUR bn)"), width="stretch")
+        st.markdown("**Issuance need under SPE at the requirements (EUR bn): what counts of the instruments of BIL**")
+        st.caption("Rows: share of the AT1 and Tier 2 of BIL that counts on top of Article 87 (lever N19). Columns: share of the senior debt of BIL that counts (lever N26). 0% in N26 is SPE. 100% treats BIL as its own resolution entity.")
+        n19s, n26s = [0.0, 0.5, 1.0], [0.0, 0.25, 0.5, 0.75, 1.0]
+        zs = [[model.run({**ov, ("Calc", "N19"): a_, ("Calc", "N26"): s_}).number("Calc", "H192") for s_ in n26s] for a_ in n19s]
+        st.plotly_chart(px.imshow(pd.DataFrame(zs, index=[f"AT1 and Tier 2 counted: {a_:.0%}" for a_ in n19s], columns=[f"Senior counted: {s_:.0%}" for s_ in n26s]).round(2), text_auto=".2f", aspect="auto",
+                                  color_continuous_scale="RdYlGn_r", labels=dict(color="EUR bn")), width="stretch")
+        st.markdown("**E. Caveats and what is not verified**")
+        show(sheet_block(MREL, "E. Caveats", ["B", "H"]))
+        st.caption("Verified: checked against the text of the law or the SRB policy. Inference: my reading. Unverified: not checked. Other sheets of the Excel file: Valuation, Balance sheet, P&L, Decisions, and Sources.")
+
+# ---------------------------------------------------------------------------------------- tab 4
+with tabs[5]:
     which = st.radio("Deal ", list(range(3)), horizontal=True, format_func=lambda i: header[W.COMBOS[i]], key="sens_deal")
     c, x = W.TGT[which], W.COMBOS[which]
     R = W.merger_start(which)
@@ -406,8 +489,8 @@ with tabs[4]:
     st.info(f"At a CET1 ratio of {floor:.1%}, the largest cash payment for this deal is EUR {max_cash:,.2f}bn "
             f"({max_cash / price:.0%} of the price of EUR {price:,.2f}bn)." if price else "No price.")
 
-# ---------------------------------------------------------------------------------------- tab 5
-with tabs[5]:
+# ---------------------------------------------------------------------------------------- tab 7
+with tabs[6]:
     st.markdown("**Review of the original sheet.** What the sheet did, and what Calc does.")
     st.table(pd.DataFrame(W.REVIEW, columns=["Where", "Type", "Finding", "Treatment in Calc"]))
     st.markdown("**Data of the banks (sheet P3DH)**")
@@ -457,8 +540,8 @@ with tabs[5]:
     st.caption("Deposit rate changes since 2024: " + ", ".join(f"{d_} {v * 100:.2f}%" for d_, v in market["rates"]["history"]) + f". Spread of the deposit rate to ESTR: {(market['rates']['spread'] or 0) * 1e4:.1f} bp.")
 
 # ---------------------------------------------------------------------------------------- tab 6
-with tabs[6]:
-    st.write("The file has the sheets Guide, Review, Calc, Merger, P3DH, Market, Peers, and Original (user). "
+with tabs[7]:
+    st.write("The file has the sheets Guide, Review, Calc, Merger, " + ("Valuation, Balance sheet, P&L, MREL scenario, Decisions, Sources, " if has_pack else "") + "P3DH, Market, Peers, and Original (user). "
              "It uses your inputs of this page. Every number is a formula. The sheets Market and Peers have Bloomberg data. Do not publish the file.")
     if st.button("Prepare the Excel file"):
         wb = W.build_workbook(banks, deals, g, market, overrides=ov)
