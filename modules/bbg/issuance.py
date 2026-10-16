@@ -176,3 +176,73 @@ def load(conn: sqlite3.Connection, banks: list[tuple[str, str]], today: dt.date 
             "static_to": max(issues["pulled_at"].dropna(), default=None) if not issues.empty else None,
             "market_to": max((q for q in issues["quote_date"].dropna()), default=None) if not issues.empty else None, "banks": banks}
     return {"issues": issues.drop(columns=["pulled_at"]) if not issues.empty else issues, "unresolved": unresolved, "meta": meta, "first_year": today.year}
+
+
+# ------------------------------------------------------------------------------------------------ bridge: P3DH accounts and MREL templates
+CC2_GROUPS = [("debt", "Debt securities issued"), ("fv", "Financial liabilities at fair value (structured notes)"), ("sub", "Subordinated debts and other borrowed funds"), ("at1", "Other equity instruments (AT1)")]
+TLAC_ROWS = {"cet1": "0010", "at1": "0020", "t2": "0060", "snp": "0100", "snp_b": "0120", "t2_am": "0130", "ns13": "0140", "ns13a": "0150", "ns14": "0160", "ded": "0230", "trea": "0270"}
+KM2_ROWS = {"total": "0010", "sub": "0020", "trea": "0030", "ratio": "0040", "sub_ratio": "0050", "tem": "0060", "tem_ratio": "0070", "tem_sub_ratio": "0080"}
+
+
+def cc2_group(label: str) -> str | None:
+    """The group of a CC2 liability line, or None when the line is not debt."""
+    t = label.replace("Type of liabilities =", "").strip().lower()
+    if t.startswith("debt securities"):
+        return "debt"
+    if "financial liabilities" in t and "fair value" in t and "held for trading" not in t:
+        return "fv"
+    if t.startswith("subordinated") or t == "other borrowed funds":
+        return "sub"
+    if t == "other equity instruments":
+        return "at1"
+    return None
+
+
+def _ratio(v: float | None) -> float | None:
+    """KM2 ratio cells are fractions for most banks and percentage points for some (above 1.5 is a percentage)."""
+    if v is None:
+        return None
+    return v / 100 if v > 1.5 else v
+
+
+def load_bridge(conn: sqlite3.Connection, banks: list[tuple[str, str]]) -> dict[str, dict[str, Any]]:
+    """For each bank: the newest date with TLAC1 (row 1) and CC2 liability lines, the CC2 debt lines by group (EUR m), the TLAC1 rows (EUR m), and the newest KM2 (amounts in EUR m, ratios as fractions).
+    The P3DH entity key of these banks is the LEI. A bank without TLAC1 or CC2 has an empty dict."""
+    out: dict[str, dict[str, Any]] = {}
+
+    def one(lei: str, template: str, row: str, date: str) -> float | None:
+        r = conn.execute("""SELECT value FROM clean_fact WHERE entity_key = ? AND template_code = ? AND row_code = ? AND column_code = '0010' AND reference_date = ? AND sheet = '' AND key_descriptor = ''
+                            AND value IS NOT NULL AND quality <> 'quarantined'""", (lei, template, row, date)).fetchone()
+        return None if r is None else float(r[0])
+
+    for short, lei in banks:
+        dates = [r[0] for r in conn.execute("SELECT DISTINCT reference_date FROM clean_fact WHERE entity_key = ? AND template_code = 'K_91.00' AND row_code = '0010' AND value IS NOT NULL ORDER BY 1 DESC", (lei,))]
+        rec: dict[str, Any] = {}
+        for date in dates:
+            lines = conn.execute("""SELECT key_descriptor, value FROM clean_fact WHERE entity_key = ? AND template_code = 'K_66.02' AND cell_code LIKE '{K_66.02.c,%' AND column_code = '0010' AND reference_date = ?
+                                    AND value IS NOT NULL AND quality <> 'quarantined'""", (lei, date)).fetchall()
+            groups: dict[str, float] = {}
+            raw: dict[str, list[str]] = {}
+            for label, value in lines:
+                g = cc2_group(label or "")
+                if g:
+                    groups[g] = groups.get(g, 0.0) + float(value) / 1e6
+                    raw.setdefault(g, []).append(label.replace("Type of liabilities =", "").strip())
+            if not groups:
+                continue
+            t = {k: one(lei, "K_91.00", row, date) for k, row in TLAC_ROWS.items()}
+            rec = {"date": date, "cc2": groups, "cc2_labels": raw, "tlac": {k: (None if v is None else v / 1e6) for k, v in t.items()}}
+            break
+        if not rec:
+            out[short] = {}
+            continue
+        kdates = [r[0] for r in conn.execute("SELECT DISTINCT reference_date FROM clean_fact WHERE entity_key = ? AND template_code = 'K_90.01' AND row_code = '0010' AND value IS NOT NULL ORDER BY 1 DESC", (lei,))]
+
+        def km2_at(d: str) -> dict[str, Any]:
+            raw_km = {k: one(lei, "K_90.01", row, d) for k, row in KM2_ROWS.items()}
+            return {"date": d, **{k: (None if v is None else (_ratio(v) if "ratio" in k else v / 1e6)) for k, v in raw_km.items()}}
+
+        rec["km2"] = km2_at(rec["date"]) if rec["date"] in kdates else {}  # KM2 of the TLAC1 date: the check of the computed ratio
+        rec["km2_new"] = km2_at(kdates[0]) if kdates else {}  # the newest KM2: totals only
+        out[short] = rec
+    return out

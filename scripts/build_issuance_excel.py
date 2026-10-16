@@ -32,12 +32,15 @@ def main() -> int:
     banks = [tuple(b.split("=", 1)) for b in args.banks]
     conn = sqlite3.connect(f"file:{Path(args.db).as_posix()}?mode=ro", uri=True)
     data = issuance.load(conn, banks)
-    issuance_xlsx.write_workbook(args.out, data)
+    bridge = issuance.load_bridge(conn, banks)
+    issuance_xlsx.write_workbook(args.out, data, bridge)
     iss, un = data["issues"], data["unresolved"]
     print(f"Saved {args.out}")
     for s, _ in banks:
         a = iss[(iss["issuer"] == s) & (iss["active"] == "Y")]
         print(f"  {s}: {len(a)} active bonds, EUR {a['eur'].sum():,.0f}m; {int((iss['issuer'] == s).sum()) - len(a)} not active; {int((un['issuer'] == s).sum())} listed names without data")
+    for s, b in bridge.items():
+        print(f"  Bridge {s}: " + (f"P3DH CC2 and TLAC1 of {b['date']}" if b else "no CC2 liability lines with TLAC1 in P3DH"))
     return 0
 
 

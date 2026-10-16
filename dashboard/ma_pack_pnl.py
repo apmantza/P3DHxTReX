@@ -283,7 +283,44 @@ def write_mrel(ws, banks: list, market: dict, pack: dict) -> dict[str, int]:
     row("sel_need", "Issuance need at the requirements, selected strategy (EUR bn)", [None, None, f"=IF($B$4=1,B{S.rows['s_need_req']},C{S.rows['m_need']})"], "bn", "Single point of entry: Calc row 192. Multiple points of entry: the sum of the two shortfalls.", None, True)
     row("sel_gap", "Instruments that NBG must buy in BIL, selected strategy (EUR bn)", [None, None, f"=IF($B$4=1,B{S.rows['s_int_gap']},0)"], "bn")
     S.skip()
-    S.head(["E. Caveats and what is not verified", "Status", "", "", "", "", "", "Source"])
+    br = pack.get("bridge") or {}
+    if br:
+        bn, bl = br["NBG"], br["BIL"]
+        both = [bn, bl]
+        g = lambda f: [f(b) for b in both]  # noqa: E731
+        bnm = lambda f: [None if f(b) is None else f(b) / 1000.0 for b in both]  # noqa: E731  P3DH amounts are in EUR m: this sheet is in EUR bn
+        tl = lambda k: bnm(lambda b: b["tlac"].get(k))  # noqa: E731
+        data2, cols2 = ["data", "data"], ("B", "C")
+        S.head(["E. Issued debt and MREL-eligible debt (P3DH data: CC2 liabilities, TLAC1, KM2)", "NBG", "BIL", "", "", "", "", "Source and note"])
+        row("b_date", "Date of CC2 and TLAC1", g(lambda b: b["date"]), "text", "Newest date that has both templates. The dates of the two banks can differ.", data2)
+        row("b_debt", "Debt securities issued (CC2)", bnm(lambda b: b["cc2"].get("debt")), "bn", "P3DH CC2, liabilities. NBG: debt securities in issue.", data2)
+        row("b_fv", "Financial liabilities at fair value: structured notes (CC2)", bnm(lambda b: b["cc2"].get("fv")), "bn", "BIL designates its structured notes at fair value.", data2)
+        row("b_sub", "Subordinated debts and other borrowed funds (CC2)", bnm(lambda b: b["cc2"].get("sub")), "bn", "NBG holds its Tier 2 inside the debt securities line.", data2)
+        row("b_at1", "AT1 (CC2 other equity instruments, else TLAC1 row 2)", bnm(lambda b: b["cc2"].get("at1") or b["tlac"].get("at1")), "bn", "NBG reports its AT1 in equity, outside the liability lines.", data2)
+        row("b_issued", "Total issued debt", [f"=SUM({c}{S.rows['b_debt']}:{c}{S.rows['b_at1']})" for c in cols2], "bn", "", None, True)
+        row("b_e_at1", "Eligible: AT1 (TLAC1 row 2)", tl("at1"), "bn", "", data2)
+        row("b_e_t2", "Eligible: Tier 2, with the part of 1 to 5 years (rows 6 and EU-12c)", bnm(lambda b: (b["tlac"].get("t2") or 0) + (b["tlac"].get("t2_am") or 0)), "bn", "", data2)
+        row("b_e_snp", "Eligible: senior non-preferred (rows 12 and EU-12b)", bnm(lambda b: (b["tlac"].get("snp") or 0) + (b["tlac"].get("snp_b") or 0)), "bn", "", data2)
+        row("b_e_ns", "Eligible: non-subordinated (row 14, else rows 13 and EU-13a)",
+            bnm(lambda b: b["tlac"]["ns14"] if b["tlac"].get("ns14") is not None else (b["tlac"].get("ns13") or 0) + (b["tlac"].get("ns13a") or 0)), "bn", "", data2)
+        row("b_elig", "Eligible debt, gross", [f"=SUM({c}{S.rows['b_e_at1']}:{c}{S.rows['b_e_ns']})" for c in cols2], "bn", "", None, True)
+        row("b_not", "Not eligible (issued less eligible)", [f"={c}{S.rows['b_issued']}-{c}{S.rows['b_elig']}" for c in cols2], "bn",
+            "The accounting lines and the MREL types do not map one to one. Structured notes with a variable principal and notes with less than 1 year left are the usual causes.")
+        row("b_share", "Eligible share of issued debt", [f"=IF({c}{S.rows['b_issued']}>0,{c}{S.rows['b_elig']}/{c}{S.rows['b_issued']},0)" for c in cols2], "pct")
+        row("b_ded", "Deduction of own holdings of other eligible instruments (TLAC1 row 20)", [x or 0.0 for x in bnm(lambda b: b["tlac"].get("ded"))], "bn", "Negative. It reduces the non-subordinated layer.", data2)
+        row("b_net", "Eligible debt after deduction", [f"={c}{S.rows['b_elig']}+{c}{S.rows['b_ded']}" for c in cols2], "bn", "", None, True)
+        row("b_cet1", "CET1 (TLAC1 row 1)", tl("cet1"), "bn", "", data2)
+        row("b_total", "Own funds and eligible liabilities, computed", [f"={c}{S.rows['b_net']}+{c}{S.rows['b_cet1']}" for c in cols2], "bn", "", None, True)
+        row("b_trea", "TREA (TLAC1 row 23)", tl("trea"), "bn", "", data2)
+        row("b_ratio", "Own funds and eligible liabilities, % of TREA, computed", [f"=IF({c}{S.rows['b_trea']}>0,{c}{S.rows['b_total']}/{c}{S.rows['b_trea']},0)" for c in cols2], "pct2", "", None, True)
+        row("b_rep", "Reported (KM2 row 3, same date)", g(lambda b: b["km2"].get("ratio")), "pct2", "", data2)
+        row("b_bp", "Difference (bp)", [f"=({c}{S.rows['b_ratio']}-{c}{S.rows['b_rep']})*10000" for c in cols2], "0.00", "Within 0.5 bp is a match: the bank reports the ratio to 0.01 percentage point.")
+        row("b_k_date", "Newest KM2: date", g(lambda b: b["km2_new"].get("date")), "text", "The model (sheet Calc) uses this KM2.", data2)
+        row("b_k_tot", "Newest KM2: own funds and eligible liabilities", bnm(lambda b: b["km2_new"].get("total")), "bn", "", data2)
+        row("b_k_chk", "Equal to Calc row 25 (1 = yes)", [f"=IF(ABS({c}{S.rows['b_k_tot']}-Calc!{k}25)<0.0005,1,0)" for c, k in zip(cols2, ("D", "E"))], "flag",
+            "Own funds and eligible liabilities in the model come from the same KM2.")
+        S.skip()
+    S.head(["F. Caveats and what is not verified", "Status", "", "", "", "", "", "Source"])
     caveats = [
         ("The SRB decides the strategy (single or multiple point of entry). The bank is heard on MREL and can appeal the MREL decision, not the plan.", "Verified", "SRMR Articles 8, 12 to 12k; SRB resolution planning cycle booklet 2024"),
         ("The law does not define single and multiple point of entry. The SRB has no default (68 single and 16 multiple of 84 resolution entities).", "Verified", "BRRD2 recital 4; SRB MREL dashboard H1 2025"),

@@ -401,6 +401,62 @@ def test_issuance() -> None:
         tmp.unlink(missing_ok=True)
 
 
+def test_bridge() -> None:
+    print("3f. bridge: issued and MREL-eligible debt from P3DH, check against KM2")
+    from modules.bbg import issuance, issuance_xlsx
+
+    check("CC2 groups: debt securities, fair-value liabilities (not held for trading), subordinated and other borrowed funds, other equity instruments; other lines are not debt",
+          [issuance.cc2_group(x) for x in ("Type of liabilities = Debt securities in issue", "Type of liabilities = Financial liabilities measured at fair value through profit or loss",
+                                           "Type of liabilities = Financial liabilities held for trading", "Type of liabilities = Subordinated debts", "Type of liabilities = Other borrowed funds",
+                                           "Type of liabilities = Other equity instruments", "Type of liabilities = Due to customers")] == ["debt", "fv", None, "sub", "sub", "at1", None])
+    check("KM2 ratio units: a fraction stays, percentage points are divided by 100", issuance._ratio(0.436) == 0.436 and abs(issuance._ratio(27.94) - 0.2794) < 1e-12 and issuance._ratio(None) is None)
+    conn = new_db()
+    conn.execute("CREATE TABLE clean_fact (entity_key TEXT, reference_date TEXT, template_code TEXT, cell_code TEXT, row_code TEXT, column_code TEXT, sheet TEXT, key_descriptor TEXT, row_label TEXT, value REAL, quality TEXT)")
+    ins = lambda d, t, cell, row, kd, v: conn.execute("INSERT INTO clean_fact VALUES ('L9', ?, ?, ?, ?, '0010', '', ?, '', ?, 'ok')", (d, t, cell, row, kd, v * 1e6))  # noqa: E731
+    for kd, v in (("Debt securities", 400), ("Subordinated debts", 50), ("Other equity instruments", 30), ("Due to customers", 9000)):
+        ins("2025-12-31", "K_66.02", "{K_66.02.c, r0010, c0010}", "0010", "Type of liabilities = " + kd, v)
+    for row, v in (("0010", 500), ("0020", 30), ("0060", 35), ("0100", 40), ("0120", 0), ("0130", 5), ("0140", 200), ("0150", 0), ("0160", 200), ("0230", -10), ("0270", 2000)):
+        ins("2025-12-31", "K_91.00", "", row, "", v)
+    for d, tot, sub, trea, ratio, sratio in (("2025-12-31", 800, 610, 2000, 40.0, 30.5), ("2026-06-30", 900, 650, 2000, 45.0, 32.5)):  # ratios in percentage points, as some banks file them
+        for row, v in (("0010", tot), ("0020", sub), ("0030", trea), ("0040", ratio), ("0050", sratio)):
+            ins(d, "K_90.01", "", row, "", v if row in ("0010", "0020", "0030") else v / 1e6)
+    conn.execute("INSERT INTO bbg_bond (security, lei, isin, currency, amt_issued, amt_outstanding, perpetual, maturity, issue_date, payment_rank, series, coupon_type, pulled_at) "
+                 "VALUES ('Z 5 01/01/2030<corp>', 'L9', 'XS0', 'EUR', 100e6, 100e6, 'N', '2030-01-01', '2024-01-01', 'Sr Preferred', 'EMTN', 'FIXED', '2026-10-14')")
+    banks = [("ZZZ", "L9")]
+    br = issuance.load_bridge(conn, banks)["ZZZ"]
+    check("bridge loader: the newest date with CC2 and TLAC1, debt lines by group, TLAC1 rows in EUR m", br["date"] == "2025-12-31" and br["cc2"] == {"debt": 400.0, "sub": 50.0, "at1": 30.0}
+          and br["tlac"]["cet1"] == 500.0 and br["tlac"]["ded"] == -10.0 and br["tlac"]["ns14"] == 200.0, str(br))
+    check("bridge loader: KM2 of the TLAC1 date and the newest KM2 (ratios as fractions)", br["km2"]["date"] == "2025-12-31" and br["km2"]["total"] == 800.0 and abs(br["km2"]["ratio"] - 0.40) < 1e-9
+          and br["km2_new"]["date"] == "2026-06-30" and br["km2_new"]["total"] == 900.0 and abs(br["km2_new"]["sub_ratio"] - 0.325) < 1e-9, str(br["km2"]) + str(br["km2_new"]))
+    check("bridge loader: a bank without CC2 liability lines and TLAC1 gives an empty result", issuance.load_bridge(conn, [("NONE", "L0")]) == {"NONE": {}})
+    try:
+        import formulas
+        import openpyxl
+        import tempfile
+    except ImportError:
+        print("  skipped (pip install formulas): the formulas of the sheet Bridge")
+        return
+    data = issuance.load(conn, banks, dt.date(2026, 10, 16))
+    tmp = Path(tempfile.mkdtemp()) / "br.xlsx"
+    issuance_xlsx.write_workbook(str(tmp), data, {"ZZZ": br})
+    sol = formulas.ExcelModel().loads(str(tmp)).finish().calculate()
+    keys = {k.upper(): k for k in sol}
+    ws = openpyxl.load_workbook(tmp)["Bridge"]
+
+    def val(label: str, col: str = "B", nth: int = 1):
+        rows = [r for r in range(1, ws.max_row + 1) if str(ws.cell(row=r, column=1).value or "").startswith(label)]
+        v = sol[keys[f"'[{tmp.name}]BRIDGE'!{col}{rows[nth - 1]}".upper()]].value
+        return v[0, 0] if hasattr(v, "shape") else v
+
+    check("bridge sheet: total issued debt 480 (400 + 50 + 30), eligible 310, not eligible 170", abs(float(val("Total issued debt")) - 480) < 1e-9 and abs(float(val("Eligible debt, gross")) - 310) < 1e-9 and abs(float(val("Not eligible")) - 170) < 1e-9)
+    check("bridge sheet: own funds and eligible liabilities 800 equal KM2, ratio 40.00% equals the reported ratio (difference below 0.5 bp)",
+          abs(float(val("Own funds and eligible liabilities, computed")) - 800) < 1e-9 and abs(float(val("Difference (EUR m)"))) < 1e-9 and abs(float(val("Difference (bp)", nth=1))) < 0.5, str(val("Difference (bp)")))
+    check("bridge sheet: subordinated 610 and 30.50%, newest KM2 totals 900 and 45.00%", abs(float(val("Own funds and subordinated liabilities, computed")) - 610) < 1e-9 and abs(float(val("Subordinated, % of TREA, computed")) - 0.305) < 1e-9
+          and abs(float(val("% of TREA, computed")) - 0.45) < 1e-9)
+    check("bridge sheet: the summary table has the same total (Tier 2 maps to the subordinated line here)", abs(float(val("Total MREL (own funds and eligible liabilities)", "C")) - 800) < 1e-9 and abs(float(val("Subordinated notes", "C")) - 40) < 1e-9)
+    tmp.unlink(missing_ok=True)
+
+
 def test_equity_and_market() -> None:
     print("4. market basis, consensus years, and the reader of the M&A workbook")
     conn = new_db()
@@ -720,6 +776,7 @@ if __name__ == "__main__":
     test_bond_history()
     test_universe()
     test_issuance()
+    test_bridge()
     test_perpetual_and_series()
     test_refresh()
     test_equity_and_market()

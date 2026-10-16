@@ -19,7 +19,7 @@ from .issuance import AT1, COVERED, DEBT_TYPES, PERPETUAL_KEY, SENIOR, SNP, SP, 
 HEAD, HEAD_FONT = PatternFill("solid", fgColor="1F3864"), Font(bold=True, color="FFFFFF")
 SECTION, INPUT = PatternFill("solid", fgColor="D9E1F2"), PatternFill("solid", fgColor="FFF2CC")
 BLUE, GREY, BOLD = Font(color="0000FF"), Font(color="808080", italic=True), Font(bold=True)
-SHEETS = ("Read me", "Profile", "Issues", "Listed without data")
+SHEETS = ("Read me", "Profile", "Bridge", "Issues", "Listed without data")
 
 ISSUE_COLUMNS = [  # (header, key, width, number format)
     ("Issuer", "issuer", 8, None), ("Active", "active", 8, None), ("Debt type", "debt_type", 34, None), ("Public / private", "public_private", 14, None), ("Programme", "programme", 11, None),
@@ -168,11 +168,13 @@ def read_me_lines(data: dict[str, Any]) -> list[tuple[str, bool]]:
         (f"Issuance of {names}: the bonds of each issuer in the Bloomberg tables of the P3DH database, with a liability profile by debt type.", True), ("", False),
         ("What this file holds", True),
         ("Profile: the liability profile by debt type, in EUR million, for each issuer and for all issuers combined. Switch B4 chooses contractual maturity or next call.", False),
+        ("Bridge: issued debt (P3DH, CC2) and MREL-eligible debt (P3DH, TLAC1) for each issuer, and a check that the own funds and eligible liabilities equal the reported KM2 ratios. Use this sheet for the size and the structure of the debt.", False),
         ("Issues: one row for each bond. Filter the columns. Column C is the debt type, column D is public or private.", False),
         ("Listed without data: live bond names that the Bloomberg search lists but that have no record in the database. They are not in the amounts of the Profile.", False), ("", False),
         ("Data dates", True),
         (f"Built on {meta['today']}. Static data of the bonds: pulled {str(meta['static_from'])[:10]} to {str(meta['static_to'])[:10]}. Latest quote date: {meta['market_to']}. FX rates for EUR: {meta['fx_date']}.", False),
-        ("Amounts are the nominal amounts outstanding that Bloomberg gives, not accounting carrying amounts. Do not compare them with a balance sheet without a bridge.", False), ("", False),
+        ("The sheets Profile and Issues show the nominal amounts outstanding that Bloomberg gives on the build date, not accounting carrying amounts. They include notes issued after the last balance sheet.", False),
+        ("Do not compare them with a balance sheet without the sheet Bridge: it uses P3DH (accounts and MREL templates) at the date of the last filing.", False), ("", False),
         ("Active", True),
         ("A bond is active when its amount outstanding is above 0 and its maturity is not in the past (or it is a perpetual). The Profile counts active bonds only.", False), ("", False),
         ("Debt types", True),
@@ -206,13 +208,19 @@ def read_me_lines(data: dict[str, Any]) -> list[tuple[str, bool]]:
     return lines
 
 
-def write_workbook(path: str, data: dict[str, Any]) -> None:
+def write_workbook(path: str, data: dict[str, Any], bridge: dict[str, dict[str, Any]] | None = None) -> None:
+    """bridge: the result of issuance.load_bridge. Without it the workbook has no sheet Bridge."""
+    from .issuance_bridge import write_bridge
+
     wb = Workbook()
     wb.active.title = SHEETS[0]
-    ws_p, ws_i, ws_u = (wb.create_sheet(n) for n in SHEETS[1:])
-    n_i = _table(ws_i, data["issues"], ISSUE_COLUMNS, "IssuesTable")
-    n_u = _table(ws_u, data["unresolved"], UN_COLUMNS, "ListedWithoutData")
-    write_profile(ws_p, data, n_i, n_u)
+    names = [n for n in SHEETS[1:] if n != "Bridge" or bridge is not None]
+    sheets = {n: wb.create_sheet(n) for n in names}
+    n_i = _table(sheets["Issues"], data["issues"], ISSUE_COLUMNS, "IssuesTable")
+    n_u = _table(sheets["Listed without data"], data["unresolved"], UN_COLUMNS, "ListedWithoutData")
+    write_profile(sheets["Profile"], data, n_i, n_u)
+    if bridge is not None:
+        write_bridge(sheets["Bridge"], lambda k: _col(ISSUE_COLUMNS, k), n_i, data["meta"]["banks"], bridge, data["issues"])
     ws = wb["Read me"]
     for i, (text, bold) in enumerate(read_me_lines(data), start=1):
         c = ws.cell(row=i, column=1, value=text)

@@ -34,6 +34,9 @@ class _Cursor:
     def __init__(self, rows: list[tuple]):
         self.rows = rows
 
+    def __iter__(self):
+        return iter(self.rows)
+
     def fetchall(self) -> list[tuple]:
         return self.rows
 
@@ -346,6 +349,14 @@ def load(query: Query, banks: list, market: dict) -> dict[str, Any]:
         pack[f"bonds_{nm}"] = part(f"bonds {nm}", lambda l=leis[i]: bonds_by_rank(query, l), {})
         pack[f"irrbb_nii_{nm}"] = {c: (it.value, it.period) for c, it in banks[i].irrbb_nii.items() if it.value is not None}
     pack["ecb"] = part("ECB drivers", lambda: ecb_drivers(query, "LU"), {})
+
+    def bridge() -> dict:
+        from modules.bbg import issuance
+
+        b = issuance.load_bridge(QueryConn(query), [("NBG", banks[0].key), ("BIL", banks[1].key)])
+        return b if all(b.values()) else {}
+
+    pack["bridge"] = part("issued and eligible debt (CC2, TLAC1, KM2)", bridge, {})
     pack["dfr_2025"] = next((p["avg"] for p in market["rates"]["periods"] if p["label"] == "2025" and p["type"] == "Y"), None)
     rows = market["peers"]["rows"]
     tb = None

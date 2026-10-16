@@ -572,8 +572,23 @@ def test_pack(wb: openpyxl.Workbook | None, loaded) -> None:
           and "P&L" not in str(wb_sw["Merger"][f"D{W.merger_start(0) + W.MOFF['t_np']}"].value))
     conn2.close()
 
+    # MREL scenario, section E: issued and eligible debt from P3DH
+    br = pack["bridge"]
+    check("MREL scenario E: the pack holds the P3DH bridge for NBG and BIL", set(br) == {"NBG", "BIL"} and all(b["date"] and b["km2"] for b in br.values()), str(list(br)))
+    r_iss, r_el, r_tot, r_bp, r_chk = (row_of(mrel, s) for s in ("Total issued debt", "Eligible debt, gross", "Own funds and eligible liabilities, computed", "Difference (bp)", "Equal to Calc row 25"))
+    for col, nm in (("B", "NBG"), ("C", "BIL")):
+        b = br[nm]
+        tl = b["tlac"]
+        issued = sum(b["cc2"].get(k, 0.0) for k in ("debt", "fv", "sub")) + (b["cc2"].get("at1") or tl["at1"])
+        elig = tl["at1"] + tl["t2"] + (tl["t2_am"] or 0) + (tl.get("snp") or 0) + (tl.get("snp_b") or 0) + (tl["ns14"] if tl["ns14"] is not None else (tl["ns13"] or 0) + (tl["ns13a"] or 0))
+        check(f"MREL scenario E, {nm}: issued debt and eligible debt equal an independent sum of the P3DH lines (EUR bn)", close(num("MREL scenario", f"{col}{r_iss}"), issued / 1000, 1e-9) and close(num("MREL scenario", f"{col}{r_el}"), elig / 1000, 1e-9))
+        check(f"MREL scenario E, {nm}: own funds and eligible liabilities equal the reported KM2 (EUR bn) and the ratio differs by less than 0.5 bp", close(num("MREL scenario", f"{col}{r_tot}"), b["km2"]["total"] / 1000, 1e-6)
+              and abs(num("MREL scenario", f"{col}{r_bp}")) < 0.5, f"{num('MREL scenario', f'{col}{r_tot}')} {b['km2']['total'] / 1000} {num('MREL scenario', f'{col}{r_bp}')}")
+        check(f"MREL scenario E, {nm}: the newest KM2 equals Calc row 25", num("MREL scenario", f"{col}{r_chk}") == 1)
+        check(f"MREL scenario E, {nm}: the eligible share of issued debt is between 0 and 100%", 0 < num("MREL scenario", f"{col}{row_of(mrel, 'Eligible share of issued debt')}") <= 1.0001)
+
     # Decisions and Sources
-    n_dec =sum(1 for r in range(5, dec.max_row + 1) if dec[f"B{r}"].value)
+    n_dec = sum(1 for r in range(5, dec.max_row + 1) if dec[f"B{r}"].value)
     vals_ok = all(not isinstance(run.get("Decisions", f"{c}{r}"), (ma_sheet.XlError, type(None))) for r in range(5, 5 + n_dec) for c in "EF")
     check("Decisions: 15 or more decisions, each with a value now and an effect now that evaluate", n_dec >= 15 and vals_ok, str(n_dec))
     check("Decisions: the strategy decision links to the switch of the MREL scenario sheet", dec["E5"].value == "='MREL scenario'!B4")

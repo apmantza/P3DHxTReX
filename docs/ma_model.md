@@ -224,7 +224,9 @@ The sidebar block "Deal pack" sets the resolution strategy (single or multiple p
   net interest income = previous + volume effect (loan growth) + rate effect (IRRBB1 sensitivity x change of the deposit rate path) + margin effect; fees and costs grow at inputs; impairment = cost of risk x average loans; tax at the rate of Calc.
   The inputs are judgments. The margin default comes from the ECB spread of new corporate loans in Luxembourg. A check row compares the base year of the lines with the trailing profit.
 - **MREL scenario.** Requirement and resources of NBG, BIL, and the combination; the Article 87 recognition; the result under a single point of entry (surplus or shortfall, issuance need, stranded senior debt, internal MREL of BIL)
-  and under multiple points of entry (BIL alone, NBG alone with an add-on for the stake); the strategy switch (B4); and a register of caveats, each marked Verified, Inference, or Unverified.
+  and under multiple points of entry (BIL alone, NBG alone with an add-on for the stake); the strategy switch (B4); a section E with the issued debt and the MREL-eligible debt of NBG and BIL as P3DH data; and a register of caveats (section F), each marked Verified, Inference, or Unverified.
+  Section E: issued debt from the CC2 liability lines, eligible debt from TLAC1 (AT1, Tier 2, senior non-preferred, non-subordinated), the deduction for own holdings of other eligible instruments, and CET1. It shows that the sum equals the reported KM2 and that the computed ratio equals the reported ratio within 0.5 bp.
+  It also checks that the newest KM2 equals Calc row 25. The dates of the two banks can differ: CC2 liability lines and TLAC1 exist for BIL at 31 December 2025, and the newest KM2 of BIL is 30 June 2026 (totals only).
 - **Decisions.** The open choices, each with its lever, its value now, and its effect now (live links).
 - **Sources.** The source, date, and limit of each item, and the data caveats from the audit of the database.
 

@@ -455,8 +455,12 @@ with tabs[4]:
         zs = [[model.run({**ov, ("Calc", "N19"): a_, ("Calc", "N26"): s_}).number("Calc", "H192") for s_ in n26s] for a_ in n19s]
         st.plotly_chart(px.imshow(pd.DataFrame(zs, index=[f"AT1 and Tier 2 counted: {a_:.0%}" for a_ in n19s], columns=[f"Senior counted: {s_:.0%}" for s_ in n26s]).round(2), text_auto=".2f", aspect="auto",
                                   color_continuous_scale="RdYlGn_r", labels=dict(color="EUR bn")), width="stretch")
-        st.markdown("**E. Caveats and what is not verified**")
-        show(sheet_block(MREL, "E. Caveats", ["B", "H"]))
+        if any(str(base.get(MREL, f"A{x}") or "").startswith("E. Issued debt") for x in range(1, 251)):
+            st.markdown("**E. Issued debt and MREL-eligible debt (P3DH data)**")
+            st.caption("Issued debt is the CC2 liability lines. Eligible debt is TLAC1. The sum equals the reported KM2 and the computed ratio equals the reported ratio. The dates of the banks can differ (see the first row).")
+            show(sheet_block(MREL, "E. Issued debt", ["B", "C"]))
+        st.markdown("**F. Caveats and what is not verified**")
+        show(sheet_block(MREL, "F. Caveats", ["B", "H"]))
         st.caption("Verified: checked against the text of the law or the SRB policy. Inference: my reading. Unverified: not checked. Other sheets of the Excel file: Valuation, Balance sheet, P&L, Decisions, and Sources.")
 
 # ---------------------------------------------------------------------------------------- tab 4
